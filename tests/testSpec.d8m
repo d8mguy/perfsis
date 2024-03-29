@@ -1,0 +1,122 @@
+// Webgen spec to show a list of tests for pfsFE charting pkg. The idea is you can go through the slides shown on thie
+// UI and compare them with what you're getting from any given version of the spec. It's not fully automatic, but should
+// be better than nothing, or than a purely textual description.
+//
+// Technically, I'm stealing code from the perfnav section of demosite. This site should present as a list of slides,
+// each consisting of a formatted text part that describes how to set the controls in the chart generator and a chart
+// showing what happens in the "official" version of the chart generating code.
+//
+// A note what I think this set of slides does and doesn't do. It captures the variety of charts you can get, and it should
+// concretely document the theory behind the package. It should be useful for regression testing changes to the perfsis
+// frontend, as long as the "specs" for that UI don't change. There's at least two kinds of bad news. The first is that
+// the regression testing is manual -- the idea is that you go through the slides in parallel with the (changed) version of
+// perfsis frontend, putting in the indicated chart setup values and eyeballing the result to verify it looks like the chart
+// on the slide. The second is that of course the specs are going to change,
+// possibly before there are any spec-preserving changes to the implementation. When that happens, the regression testing
+// utility of these slides can be restored by updating the saved charts.
+
+state slides: object      // this gets filled in by onLoad transition, used as a dict
+state slidesList: list(object)
+
+transition onLoad "loadSaved" => GET() then doLoad response {slidesList}+setupSlides(slidesList)
+
+components IncludeHtmlDangerously, RechartWrapper0
+
+javascript {
+
+    // See doLoad: the items in slist have text and chart props.
+    function setupSlides(slist) {
+        let slistx = []
+        slist.forEach(item => {
+            let slides = item.slides.map(txtchart => {
+                return (<div>
+                    <div style={{minHeight:"15px"}}></div>
+                    <IncludeHtmlDangerously html={txtchart.text} />
+                    <div style={{minHeight:"15px"}}></div>
+                    <RechartWrapper0 w={600} h={450} params={txtchart.chart.params} data={txtchart.chart.data} />
+                </div>)
+            })
+            const obj = {title: item.title, slides:slides}
+            // console.log("setup pnd item", obj)
+            slistx.push(obj)
+        })
+        setSlides({title: "Tests", nodes: slistx})      // bind SV
+    }
+
+}
+
+css {
+    .App {
+        background-color: #f0f0f0;
+        font-size: medium;
+        margin-left: 10px;
+    }
+}
+
+pagespec initialPage = Div(class~App) {
+    VSpace(height~"30px")
+    FlexWrap(dir~"row", justify~"start", align~"center") {
+        TreeNavigator(tree~"slides", width~"700", height~"800")
+    }
+}
+
+
+import "webgen/md2html"
+import go "os"
+import "file"
+import "strings"
+import go "flag"
+
+val stateAttribs = tuple(
+    dirname:string
+)
+
+val runstateT = extend stateAttribs where {
+
+    method commandLine = \mod() {
+        flag.Parse()
+        val args = flag.Args()
+        if(args.count > 0) dirname = args[0]
+    }
+
+    // the format of returned values is a list({title:X,slides:list(Y)}) where X is perfspec name and Y is {text:A,chart:B};
+    // the text is html and chart is the saved chart data.
+    method doLoad = \mod() {
+        val slidesDir = "#{dirname}/slides"
+        val rddir = os.ReadDir(slidesDir)
+        if(rddir.err != nil) return [actionfnRettype: "can't read slides directory", 0, ""]
+        val slideFilenames = rddir.ok.{this.Name()}.[strings.endsWith(this, ".md")]
+        var jstrm = [json.jsonStreamer: ]
+        jstrm.add("{\"slidesList\":[")
+        val fncount = slideFilenames.count - 1
+        each(nm^slideFilenames, fninx) {    // get metadata file for its docmtn string
+            val nm0 = nm[0...nm.count - 3]     // strip ".md"
+            var slides = strings.split(md2html.get(nm0, slidesDir), "<hr />\n")
+            // trim final "slide" if there was an extra HR
+            if(slides.count != 0 && cvt(slides.last, list(byte))[!(this in [' ', '\t', '\n', '\r'])] == nil) slides.popb
+            jstrm.add("{\"title\":")
+            jstrm.toJsonString(nm0)
+            jstrm.add(",\"slides\":[")
+            val lastinx = slides.count - 1
+            each(slide^slides, inx) {
+                jstrm.add("{\"text\":")
+                jstrm.toJsonString(slide)
+                jstrm.add(",\"chart\":")
+                val svfname = "#{dirname}/savedcharts/#{nm0}.test#{inx+1}"
+                var fdesc = file.openWithError(svfname)
+                if(tag(fdesc) == :err) exit("couldn't read #{svfname}")
+                val bytes: list(byte) = zerolist(fdesc.size())
+                fdesc.read(bytes)
+                fdesc.close()
+                jstrm.addbytes(bytes)
+                jstrm.add("}")
+                if(inx < lastinx) jstrm.add(",")
+            }
+            jstrm.add("]}")
+            if(fninx < fncount) jstrm.add(",")
+        }
+        jstrm.add("]}")
+        [actionfnRettype: "", 0, jstrm.out()]
+    }
+}
+var progstate = [runstateT: "."]

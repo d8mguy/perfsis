@@ -1,0 +1,51 @@
+import go "math/rand"
+import go "time"
+import go "flag"
+
+
+// The difference between O(N) and O(log(N)) list search is well known but I've never seen an answer to the question of
+// where the runtimes cross. Obviously, the answer depends on many details. This perfspec answers that question.
+// Specifically, generate lists of various lengths and run some searches on them. Use a substn to vary this between lists
+// and olists, and another to search both integers and tuple. Run 1000 lookups and avg. Only param is listSize, the 2 substns
+// give additional params.
+
+import "olist" melted
+import go "math/rand"
+import go "os"
+import go "log"
+
+// size 100, 400, 1000, 2000
+var listSize:integer = flag.Int(`a`, 0, "steady state size of list")
+
+
+val tuptype = tuple(a:integer, b:float, c:string)
+
+
+
+
+val loadModel = \imp() {
+    var dbgfile = os.Create("/dev/null")
+    val logger = log.New(dbgfile.ok, "", 0)     // see below; logging disables unwanted compiler optimizations
+    val maker = \(x:integer) { [tuptype: x, 5.3*x, ["aa", "bcde", "erkj"][x%3]] }
+        val elts = (1..listSize).{ maker(rand.Intn(50000)) }; val theList = elts
+    val probes = (1..1000).{ maker(rand.Intn(50000)) }
+    var found = 0
+    val t0 = time.Now()
+    each(elt^probes) if(elt in theList) found += 1
+    val dur = time.Since(t0)
+    logger.Println(found)
+    print(round(1e-3*dur))
+
+}
+
+
+var seed:integer = flag.Int(`seed`, 0, ``)
+val runQuery = \imp() {
+flag.Parse()
+if(seed != 0) rand.Seed(seed)
+
+    loadModel()
+
+println()
+}
+runQuery()

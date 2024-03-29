@@ -1,0 +1,67 @@
+import go "math/rand"
+import go "time"
+import go "flag"
+
+
+// Sort tuples on elements in 2 ways: strip sort with an extract ftn, and with a synthd compare ftn.
+
+import "sort" melted
+import go "math"
+import go "math/rand"
+
+val tupT = extend tuple(a: string, b:integer, c:float) where {
+    method lithook = \mod(rval: integer) {
+        a = ["a", "b", "c", "d", "e", "f", "g"][rval % 7]
+        b = rval
+        val tmp = cvt(rval, float)/125.7
+        c = tmp * tmp
+    }
+}
+
+// Euclidean distance but since only comparing, we don't need to do the sqrt: d1 < d2 iff d1^2 < d2^2.
+// We're baking in a distance from a specific value, here we're in 1d and pick 100.0 (for no particular reason).
+val distanceFrom = \(x:float) {
+    x * x - 10000.0
+}
+val distanceFromSq = \(x:float) {
+    math.Sqrt(x * x - 10000.0)
+}
+
+var listSize:integer = flag.Int(`a`, 0, "number of random items in list that gets sorted")
+
+var extractComplexity:string = flag.String(`b`, "", "complexity of extraction function")
+
+
+
+
+// repeat each create+sort 4x and take min time. Time to generate list isn't counted.
+val loadModel = \imp() {
+    var tmin, tmax, ttotal: integer
+    each(i^1..4) {
+        val theList: list(tupT) = (1..listSize).{ [tupT: rand.Intn(200000)] }
+        val dfn = extractComplexity == "simple" ? distanceFrom : distanceFromSq
+        val t0 = time.Now()
+        val sortCall = sort(theList, \(x,y:tupT) { dfn(x.c) < dfn(y.c) })
+        var since = time.Since(t0)
+        ttotal += since
+        if(i == 1 || tmin > since) tmin = since
+        if(i == 1 || tmax < since) tmax = since
+    }
+    print(2.5e-4 * ttotal)
+
+    print(`,`, 100.0*(tmax - tmin)/tmin)
+
+}
+
+
+
+var seed:integer = flag.Int(`seed`, 0, ``)
+val runQuery = \imp() {
+flag.Parse()
+if(seed != 0) rand.Seed(seed)
+
+loadModel()
+
+println()
+}
+runQuery()

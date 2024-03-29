@@ -1,0 +1,500 @@
+// read a perfspec, create a working dir (if needed), and generate d8m files to run load model with all substitutions,
+// plus a pfsData.json file to describe everything, and a pfsdriver.d8m file that will compile and run the LM (load model) files.
+//
+// Probably worth noting that I wrote this before I wrote lexparse. I probably wouldn't have rolled my own tokenizer if things
+// had been done in the other order.
+
+import go "flag"
+import "dict" melted
+import "file"
+import "olist"
+import "codecs/json"
+import "bytes"
+import "regexp"
+import "combics" melted
+import go "strings"
+import go "os"
+import go "os/exec"
+
+// these are needed for flags to pass parameters and to code substitutions: 24 letters means at most 24 parameters
+// and 24 substituents. No limit on # of substitute stmts (though more than 2 is unlikely). It wouldn't be too difficult
+// to change the codings but I don't expect either of these limits to be meaningful in any realistic usage scenario.
+val letters = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x"]
+val fnPrefix = "LM"
+
+// initial part of files generated from load model
+val fileHeader = `import go "math/rand"
+import go "time"
+import go "flag"
+
+
+`           // note: end of fileHeader string
+
+val stripQuotes = \(strg: list(byte)) { cvt(strg[1...strg.count - 1], string) }
+
+import "perfsis/types" melted
+
+
+// generates the outputs when all lines have been processed for stmts.
+// Note that the "tokens" args in the stmt processing methods are always in the unpacked triple form returned
+// by scanexpT.scan, so [lo, hi, tokinx] where lo and hi are indices in the line and tokinx is the index in
+// the list of patterns initializing the scanexpT.
+
+// Each processed statement remembers where it occurred and what it outputs ("" for subst and query)
+// We need to remember additional things about param and output statements, to generate the driver.
+val paramT = tuple(ident, docstrg, rangespec, unit: string)
+val outputT = tuple(ident, docstrg, typename, unit: string)
+val stmtT = tuple(ofs0, ofsN:integer, outstrg:string)
+
+// for each substFor, keep a target list from its substitute stmt, plus where it occurs in the input
+val textPosition = tuple(lo, hi:integer)
+
+// substInfo holds values in substDict: the list of substTo's (targets) and the positions where substFrom occurs (occs).
+// Note that even numbered elts of targets are the substTo's & odd numbered the corresp doc strings.
+val substInfo = tuple(docstrg:string, targets:list(string), occs:list(textPosition))
+
+// We use an olist (ordered on ofs0) of substPts to organize output: a substPt reps one occurrence of a substitution
+// or spec stmt. We copy the contents of the perfspec file verbatim except in the ranges given by substPts.
+// For stmts, inx0 indexes stmts and inx1 is -1; for substns, inx0 indexes substFors and inx1 indexes the combns that
+// tell which substTo is used for the current output file.
+val substPt = tuple(ofs0, ofsN, inx0, inx1:integer)
+val substPtList = olist.olist(substPt, integer, \(sp:substPt) { sp.ofs0 })
+
+// We use tokenStream for substitution. The tokens are generated before scanning so editOffset records how many bytes
+// have been added or deleted so far relative to the indices in the tokens list. Thus, it is used in both getting the
+// current token and updating (the replace method).
+val tokenStream = extend tuple(contents:list(byte), tokens:list(integer), tokinx, editOffset:integer) where {
+    method current = \() {
+        if(tokinx >= tokens.count) ""
+        else {
+            val i0 = tokens[tokinx], i1 = tokens[tokinx+1]
+            cvt(contents[i0-editOffset...i1-editOffset], string)
+        }
+    }
+    // edit current token, replacing it with newcontent. Assume (without checking) that tokinx is legit. Update editOffset.
+    method replace = \mod(newcontent:list(byte)) {
+        val i0 = tokens[tokinx]-editOffset, i1 = tokens[tokinx+1]-editOffset
+        val curlen = i1 - i0
+        //print("replace:#{i0};#{i1};#{editOffset}: ", cvt(contents[i0...i1], string), "with", cvt(newcontent, string))
+        contents.removeSeq(i0, i1)
+        contents.insert(i0, newcontent)
+        editOffset += curlen - newcontent.count
+        //println("result:", cvt(contents, string), "EO:", editOffset)
+    }
+    method next = \mod() { tokinx += 3; current() }
+    method done = \() { tokinx >= tokens.count }
+}
+
+// The tokexprs create a regexp.scanexpT, aka a poor man's tokenizer, see regexp module. The labels correspond.
+// String literals similar to go+d8m, ie dblquote string accepts \n, \t, \\, \"; raw strings can embed newlines.
+val tokexprIndices = label(:comma, :newline, :ident, :dqstrg, :bqstrg, :lncomment, :mlncomment, :fltlit, :intlit, :done)
+val tokexprs = [",", "\n", "[a-zA-Z_][a-zA-Z_0-9]*", `"(?:[^\\\n"]|\\[nt"\\])*"`, "(?s)`.*?`", "//.*\n", `(?s)/\*.*\*/`, "[0-9]*\\.[0-9]+", "[0-9]+"]
+val tokScanner = [regexp.scanexpT: tokexprs]
+
+// A stateinfo holds all the state info to translate a perfspec file. The specstateT extends it with methods.
+val stateinfo = tuple(contents:list(byte),
+    // these 4 slots manage state related to the current token
+    tok0, tok1:integer, tokType: tokexprIndices,
+    errors:list(string),
+    substDict:dict(string, substInfo),
+    stmts:list(stmtT),
+    params:list(paramT),
+    outdescs:list(outputT),
+    descrn: string,
+    qry:string,
+    fnmParts:file.filenameParts,
+    outcount:integer,
+    // state vbls for output
+    filecounts:list(integer),
+    outfmts:list(integer),
+    substnPoints: substPtList
+)
+
+val specstateT = extend stateinfo where {
+    method nextToken = \mod() {
+        loop {
+            val nxtkn = tokScanner.next(contents, tok1)
+            if(nxtkn.count != 0) {
+                tok0 = nxtkn[0]
+                tok1 = nxtkn[1]
+                tokType = nxtkn[2]
+                // Prevent // comments from eating the newline since the main stmt processing depends on it to find e.g. output stmts.
+                if(tokType == :lncomment) { tokType = :newline; tok0 = tok1 - 1 }
+                unless(tokType == :mlncomment) break
+            } else { tokType = :done; break }
+        }
+        cvt(contents[tok0...tok1], string)
+    }
+
+    // Return a comment token if that's what the next one is, else return ""
+    // Note that we consume the token in any case.
+    method nextComment = \mod() {
+        val nxtkn = tokScanner.next(contents, tok1)
+        tok0 = nxtkn[0]
+        tok1 = nxtkn[1]
+        tokType = nxtkn[2]
+        tokType == :lncomment || tokType == :mlncomment ? cvt(contents[tok0...tok1], string) : ""
+    }
+
+    // This one kinda blurs the usual tokenize/parse distinction. It either skips past a comma and returns the following
+    // string token (skipping any newlines) or leaves the token position as is, returning ""
+    method nextAfterComma = \mod() {
+        val t0 = tok0, t1 = tok1, tt = tokType      // save
+        var nx = nextToken()
+        if(tokType == :newline) nx = nextToken()
+        if(tokType == :comma) nx = nextToken()
+        if(tokType == :newline) nx = nextToken()
+        if(tokType == :dqstrg || tokType == :bqstrg) return nx
+        self.tok0 = t0
+        self.tok1 = t1
+        self.tokType = tt
+        return ""
+    }
+    // this is used only for error reporting so it's intentionally inefficient
+    private method linenum = \() { 1 + count(contents[0...tok0].[this == '\n']) }
+
+    method inError = \() { errors.count > 0 }
+    method recordError = \mod(msg:string) {
+        errors.pushb(msg + " in line #{self.linenum}; last token was '#{cvt(contents[tok0...tok1], string)}'")
+    }
+    method reportErrors = \() {       // call only if inError
+        each(err^errors) println("error: ", err)
+    }
+
+    method lithook = \mod(content: list(byte), fnmp:file.filenameParts) {
+        contents = content
+        fnmParts = fnmp
+        // For tokenizing the perfspec, look for only the things we care about, we won't worry about other things in non-stmt lines
+        substDict = [dict(string, substInfo):]
+        substnPoints = [substPtList: ]
+        descrn = ""
+    }
+
+    // A parameter stmt adds one param to the list; each parameter generates a range of values in the driver, and the
+    // combinations of parameter values generate the rows of the measurements file, with outputs as the final cols in each row.
+    method param = \mod() -> nothing {
+        val p0 = tok0
+        val pdecl = nextToken()
+        unless(tokType == :dqstrg || tokType == :bqstrg) { recordError("string expected"); return }
+        val asString = stripQuotes(pdecl)
+        val pdsplit = strings.Split(asString, ":")
+        if(pdsplit.count != 2) { recordError("param decl is missing type information"); return }
+        val pname = pdsplit[0]
+        val ptype = pdsplit[1]
+        val symbWanted = tokScanner.scan(cvt(pname, list(byte)))
+        unless(symbWanted.count == 3 && symbWanted[2] == 2) { recordError("parameter name must be a symbol"); return }
+        unless(ptype in ["integer", "float", "string", "boolean"]) { recordError("cannot use #{ptype} as parameter type"); return }
+        val docstrg = nextAfterComma()
+        if(docstrg == "") { recordError("doc string expected"); return }
+        val rangespec = nextAfterComma()
+        if(rangespec == "") { recordError("range spec expected"); return }
+        val unitspec = nextAfterComma()
+        // at this point all args have been collected successfully, create and record in a paramT and a stmtT
+        params.pushb([paramT: pname, stripQuotes(docstrg), stripQuotes(rangespec), unitspec])
+        if(params.count > letters.count) { recordError("too many params"); return }
+        var pti = "Int"
+        var ptv = "0"
+        if(ptype == "float") { pti = "Float"; ptv = "0.0" }
+        else if(ptype == "boolean") { pti = "Bool"; ptv = "false" }
+        else if(ptype == "string") { pti = "String"; ptv = `""` }
+        stmts.pushb([stmtT: p0, tok1, "var #{asString} = flag.#{pti}(`#{letters[params.count-1]}`, #{ptv}, #{docstrg})\n"])
+    }
+
+    // A substitute stmt induces generate to create multiple output files. Process args into substDict. A subst stmt of the form
+    //   substitute XXX, "xxx doc", "aa", "aa doc", "bb", "bb doc", "cc", "cc doc"
+    // should generate a dict entry mapping XXX --> [aa, "aa doc", bb, "bb doc", cc, "cc doc"]
+    // Then generate will create 3 files with XXX replaced by aa, bb, and cc respectively, and with the doc strings in a meta data file.
+    method subst = \mod() -> nothing {
+        val ofs0 = tok0
+        val substfor = nextToken()      // This is the WORD that triggers substitution
+        if(tokType != :ident) { recordError("identifier expected"); return }
+        if(substDict[substfor] != nil) { recordError("identifier is already used"); return }
+        val descrn = nextAfterComma()      // This is the docstrg for the whole substitution
+        if(descrn == "") { recordError("expected doc string"); return }
+        var substns:list(string) = []
+        loop {
+            var tokstrg = nextAfterComma()
+            if(tokstrg == "") break
+            substns.pushb(stripQuotes(tokstrg))
+            val docstrg = nextAfterComma()
+            if(docstrg == "") {
+                recordError("doc string expected")
+                return
+            }
+            substns.pushb(stripQuotes(docstrg))
+            if(substns.count > letters.count * 2) { recordError("too many substituents"); return }
+        }
+        if(substns.count == 0) { recordError("substitute statement must have at least one substituent"); return }
+        substDict[substfor] = [substInfo: stripQuotes(descrn), substns, []]
+        stmts.pushb([stmtT: ofs0, tok1, ""])        // Delete substitute stmt in output
+    }
+
+    // output stmts should generate code at the point they appear in the perfspec file.
+    // The arg format is 2 comma separated quoted exprs, first a 3-4 field descr, then an expr to print.
+    // Note that we generate the print stmt right here as the string that replaces this output stmt.
+    method output = \mod() -> nothing {
+        val ofs0 = tok0
+        var tokstrg = nextToken()
+        unless(tokType == :dqstrg || tokType == :bqstrg) { recordError("missing output descriptor"); return }
+        val tokbody = stripQuotes(tokstrg)
+        // Note that this scan pattern will not collect the last field; following code does that
+        val fields = strings.Split(stripQuotes(tokstrg), ":")
+        unless(fields.count == 3 || fields.count == 4) { recordError("output descriptor: bad format"); return }
+        val units = (fields.count == 3 ? "" : fields[3])
+        val outdesc = [outputT: fields[0], fields[1], fields[2], units]
+        var outfmt = 3
+        if(fields[2] == "integer") outfmt = 2
+        else if(fields[2] == "float") outfmt = 1
+        outfmts.pushb(outfmt)
+        var expr = nextAfterComma()
+        if(expr == "") { recordError("string expected"); return }
+        outdescs.pushb(outdesc)
+        var printStmt = "print("
+        if(outcount > 0) printStmt += "`,`, "
+        stmts.pushb([stmtT: ofs0, tok1, printStmt + stripQuotes(expr) + ")\n"])
+        outcount += 1
+    }
+
+    // Just record next token.
+    method query = \mod() -> nothing {
+        if(qry != "") { recordError("multiple query statements"); return }
+        val ofs0 = tok0
+        val arg = nextToken()
+        unless(tokType == :dqstrg || tokType == :bqstrg) { recordError("string expected"); return }
+        qry = stripQuotes(arg)
+        stmts.pushb([stmtT: ofs0, tok1, ""])
+    }
+
+    // Called on ident tokens that don't begin perfspec statements so we can record where substitutions occur
+    method checkSubstn = \mod(tok:string) {
+        var sinfo = substDict[tok]
+        if(sinfo != nil) sinfo.occs.pushb([textPosition: tok0, tok1])
+    }
+
+    // Call this when the contents have been scanned. It sets up the substnPoints olist to guide output file generation.
+    // Important to understand that in this context, "substn" means every statement type, not just "substitute" stmts.
+    // Thus, the substnPoints olist lists all the segments of the perfspec that aren't copied verbatim.
+    // Stmt indices for substPt purposes are [subst, param, output, query]
+    method prepOutput = \mod(substFors: list(string), substTos:list(substInfo)) {
+        each(substn^substTos, substinx) each(occ^substn.occs, occinx) substnPoints.insert([substPt: occ.lo, occ.hi, substinx, occinx])
+        each(stmt^stmts, index) substnPoints.insert([substPt: stmt.ofs0, stmt.ofsN, index, -1])
+    }
+
+    // Given a list of substn pairs, generate and write a d8m file by interpreting the statements that were processed
+    // in the scan of the contents. The combn consists of indices into the set of substn pairs and its length is equal
+    // to the number of substitute statements encountered: [] for none, [i] for 1, etc.
+    // The substTos is the same thing as passed to prepOutput method.
+    method generateOne = \mod(combn:list(integer), substFors:list(string), substTos:list(substInfo)) {
+        // Combns tells us which targets to select in the substns. Replace substTos with selected targets
+        // and then run substitution on them.
+        //println("Gen1:", substFors)
+        // Careful: substTos must drive this xp, else it'll crash.
+        var localSubstTos = [sto~substTos, sel~combn].xp.{ sto.targets[sel*2] }
+        val substInto = \imp(text:list(byte), pr:boolean) -> list(byte) {
+            var text0 = copy(text)
+            val tokens = tokScanner.scan(text)
+            var strm = [tokenStream: text0, tokens, -3, 0]
+            loop {
+                if(strm.done()) break
+                val tok = strm.next()
+                if(pr) print(" |#{tok}|")
+                val substn = substFors.index(tok)
+                if(substn != nil) {
+                    strm.replace(localSubstTos[substn])
+                }
+            }
+            strm.contents
+        }
+        //println("LST before:", localSubstTos)
+        each(i^0...localSubstTos.count) localSubstTos[i] = cvt(substInto(localSubstTos[i], false), string)
+        //println("LST    after:", localSubstTos)
+        // Form the filename by concatenating the indices mapped to letters of the alphabet: 'a' for 0, etc.
+        fnmParts.base = fnPrefix + cvt(combn.{ letters[this][0] }, string)
+        val fnm = cvt(file.filenamePut(fnmParts), string)
+        var outf = file.createBasic(fnm)
+        // copy fixed decls in, then use substnPoints to guide switching between perfspec and special output formatting
+        outf.write(fileHeader)
+        var ofs = 0
+        each(spt^substnPoints) {
+            val tmp = substInto(contents[ofs...spt.ofs0], ofs == 878)
+            outf.write(tmp)
+            ofs = spt.ofsN
+            if(spt.inx1 < 0) {      // stmt
+                outf.write(substInto(stmts[spt.inx0].outstrg, false))
+            } else {
+                outf.write(localSubstTos[spt.inx0])
+            }
+        }
+        outf.write(substInto(contents[ofs...contents.count], false))
+        // finally, wrap the query and call it. We haven't scanned for substitutions therein, do that now
+        outf.write("\nvar seed:integer = flag.Int(`seed`, 0, ``)")
+        outf.write("\nval runQuery = \\imp() {\nflag.Parse()\n")
+        // Note: I recently learned that the go folks have deprecated rand.Seed in favor of generating an explicit Source.
+        // The reason for the deprecation is that in general use cases, changes to an unrelated piece of code (that uses
+        // the global Source of math/rand) can change the sequence generated by calling the generator a different number of
+        // times. This cannot happen here, so the current code is perfectly safe. Fixing it to avoid the deprecated call
+        // requires 2 things: (1) fix the compiler to know how to generate multiple random Sources; (2) change all perfspecs
+        // to use an explicit random Source, perhaps one with a fixed identifier or that is somehow identified so that
+        // generated code can Seed it. The first task is fairly easy and generally a good idea; the second is less easy
+        // and will break existing perfspecs. As far as I can tell, rand.Seed will not be deleted, so it is probably safe
+        // to leave the code here as is.
+        outf.write("if(seed != 0) rand.Seed(seed)\n")
+        val qry0 = substInto(cvt(qry, list(byte)), false)
+        outf.write(qry0)
+        outf.write("\nprintln()\n}\nrunQuery()\n")
+        outf.close()
+    }
+
+    // This just handles substitution, calling generateOne for each load file to be generated
+    method generateLoads = \mod() {
+        fnmParts.extn = "d8m"
+        val substFors = substDict.keys
+        val substTos = substDict.values
+        println("substFors:", substFors, "substTos:", substTos)
+        prepOutput(substFors, substTos)
+        if(substFors.count == 0) {
+            filecounts = [1]
+            generateOne([0], substFors, substTos)
+        } else if(substFors.count == 1) {
+            val substFor = substFors[0]
+            val substns = substTos[0].targets
+            filecounts = [substns.count/2]
+            each(i^0...substns.count/2) generateOne([i], substFors, substTos)
+        } else {
+            // generate all indices from the number of substitutions (see combics module)
+            filecounts = substTos.{ this.targets.count/2 }
+            var indices = [streamIndices: filecounts]
+            while(!indices.done) {
+                val ind0 = indices.next
+                generateOne(ind0, substFors, substTos)
+            }
+        }
+    }
+
+    // Write pfsdriver.d8m by reading a template file, finding the positions of 3 substitution points, doing
+    // certain substitutions, and writing that out. Since this is entirely internal I've chosen to use a simple
+    // but hackish way to indicate subsitution points: %%0 means ranges in genParams, %%1 means nfiles, %%3 is #outputs
+    method generateDriver = \mod() {
+        // note that the dir of the template file is eventually going to be something besides "."
+        val userDir = os.Getenv("HOME")
+        if(userDir == "") exit("can't get $HOME")
+        var drvrFnp = userDir + "/Library/Application Support/D8m/Perfsis/pfsdtempl8.d8m"
+        val dtmpl8 = file.openStream(drvrFnp)     // exits on error...
+        val rxpfs = [regexp.regexpT: `%%\d`]
+        val indices = rxpfs.findAllIndices(dtmpl8.contents)     // there should be 4 pairs
+        val outfile = "pfsdriver.d8m"
+        var outf = file.createBasic(outfile)
+        var curinx = 0
+        each(pr^indices) {
+            outf.write(dtmpl8.contents[curinx...pr[0]])
+            curinx = pr[1]
+            val char3 = dtmpl8.contents[curinx - 1]
+            if(char3 == '0') {          // ranges
+                each(param^params) {
+                    outf.write("strgs.pushb(#{param.rangespec}.{ stringify(this) })\n")
+                }
+            } else if(char3 == '1') {                    // filecounts
+                outf.write(stringify(filecounts))
+            } else {                    // #outputs
+                outf.write(stringify(outcount))
+            }
+        }
+        outf.write(dtmpl8.contents[curinx...dtmpl8.contents.count])
+        outf.close()
+        val compile1 = exec.Command("d8mc", [outfile]).CombinedOutput()
+        val outstrg = cvt(compile1.out, string)
+        if(compile1.err != nil) exit(cvt(compile1.err, string) + "; compile returns " + outstrg)
+        println("compile of #{outfile} returns", outstrg)
+    }
+
+    // Generate and write the meta.info file, pfsData.json. The metadata0 arg tells whether it's the initial write or not.
+    // If initial version, it's set up for initial state with empty parameter values, as we don't have
+    // easy access to those yet. pfsdriver will notice and fill them in. Otherwise, update the hypershape params, which
+    // allows users to change eg identifiers and descriptions, but preserve contexts and version.
+    method generateMeta = \mod(basename: string, metadata0:PfsData) {
+        var metaf = file.createBasic("pfsData.json")     // exits on error...
+        var jstrm = [json.jsonStreamer: ""]
+        var metadata = copy(metadata0)
+        metadata.cube = [Cubedef: basename, descrn, params.{[Parameter: this.ident, this.docstrg, this.unit, []] },
+                                outdescs.{[Output: this.ident, this.docstrg, this.unit] }]
+        metadata.substns = substDict.{ [Parameter: key, value.docstrg, "", value.targets.[index % 2 == 1]] }
+        jstrm.toJsonPretty(metadata, "  ")
+        metaf.write(jstrm.out())
+        metaf.close()
+    }
+
+}
+
+// This is main. Read the perfspec file given as argument, parse it, translate to 1 or more d8m load model files, and generate
+// a driver file (also as d8m).
+val readAndGenerate = \imp() {
+    flag.Parse()
+    val args = flag.Args()
+    if(args.count < 1) exit("missing filename argument")
+    // get fname and split it into path and filename proper
+    var fnmParts = file.filenameGet(args[0])
+    unless(fnmParts.extn == [] || fnmParts.extn == "perfspec") exit("'#{fnmParts.extn}': unrecognized extension")
+    if(fnmParts.extn == []) fnmParts.extn = "perfspec"
+    val perfspec = file.openStream(cvt(file.filenamePut(fnmParts), string))     // exits on error...
+    // At this point perfspec.contents is a list(byte) of the file upon which I wish to do xfms:
+    // pass to specstateT which will tokenize and record line boundaries.
+    // Then we can check lines whose first token is a wanted keyword and run stmt processing code on lines with such keywords.
+    // The first comments in the perfspec file are meant to be a descrn; save that for the meta file, stripping // and newline.
+    var state = [specstateT: perfspec.contents, fnmParts]
+    var cmnt = state.nextComment()
+    while(cmnt != "") { state.descrn += cmnt[2...cmnt.count-1]; cmnt = state.nextComment() }
+    loop {
+        if(state.inError) { state.reportErrors; exit("") }
+        val tokn = state.nextToken()
+        if(tokn == "\n") {
+            val tokn0 = state.nextToken()
+            if(state.tokType == :ident) {
+                if(tokn0 == "parameter") { state.param(); continue }
+                else if(tokn0 == "substitute") { state.subst(); continue }
+                else if(tokn0 == "output") { state.output(); continue }
+                else if(tokn0 == "query") { state.query(); continue }
+                state.checkSubstn(tokn0)
+            } else if(state.tokType == :newline) {
+                // put back, else FSM can screw up
+                state.tok1 -= 1
+            }
+        }
+        if(state.tokType == :done) break
+    }
+    if(state.qry == "") state.recordError("missing query statement")
+    if(state.inError) { state.reportErrors; exit("") }
+    // Before generating any outputs, ensure the working directory exists
+    val curwd = os.Getwd()
+    val basename = cvt(fnmParts.base, string)
+    val path = curwd.ok + "/wd.#{basename}"
+    os.MkdirAll(path, 0x1cb)       // octal 755 = 1cb; MkdirAll does nothing if dir exists
+    os.Chdir(path)
+    var metadata:PfsData
+
+    // check if pfsdata.json exists and if so, check if it's compatible with hypershape developed here
+    val pfsd = file.openWithError("pfsData.json")
+    if(tag(pfsd) == :err) {
+        metadata.version = -1
+    } else {
+        val bytes: list(byte) = zerolist(pfsd.size())
+        pfsd.read(bytes)
+        pfsd.close()
+        var jstrm = [json.jsonStreamer: bytes]
+        var metadata: PfsData = jstrm.fromJson()
+        val errs = jstrm.errors()
+        if(errs != "") exit(errs)
+        // Compatibility means "same hypershape" means number of params, outputs, substns matches
+        val prmc = state.params.count, xprmc = metadata.cube.params.count
+        val outc = state.outdescs.count, xoutc = metadata.cube.outputs.count
+        val substc = state.substDict.count, xsubstc = metadata.substns.count
+        unless(prmc == xprmc && outc == xoutc && substc == xsubstc) {
+            if(prmc != xprmc) println("param count changed: was", xprmc, "now", prmc)
+            if(outc != xoutc) println("outputs count changed: was", xoutc, "now", outc)
+            if(substc != xsubstc) println("# substns changed: was", xsubstc, "now", substc)
+            exit("Nothing done since incompatible hypershape: delete directory contents and try again")
+        }
+    }
+    state.generateLoads()
+    state.generateDriver()
+    state.generateMeta(basename, metadata)
+}

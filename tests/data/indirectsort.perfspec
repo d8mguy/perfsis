@@ -1,0 +1,53 @@
+// Sort tuples on elements in 2 ways: strip sort with an extract ftn, and with a synthd compare ftn.
+
+import "sort" melted
+import go "math"
+import go "math/rand"
+
+val tupT = extend tuple(a: string, b:integer, c:float) where {
+    method lithook = \mod(rval: integer) {
+        a = ["a", "b", "c", "d", "e", "f", "g"][rval % 7]
+        b = rval
+        val tmp = cvt(rval, float)/125.7
+        c = tmp * tmp
+    }
+}
+
+// Euclidean distance but since only comparing, we don't need to do the sqrt: d1 < d2 iff d1^2 < d2^2.
+// We're baking in a distance from a specific value, here we're in 1d and pick 100.0 (for no particular reason).
+val distanceFrom = \(x:float) {
+    x * x - 10000.0
+}
+val distanceFromSq = \(x:float) {
+    math.Sqrt(x * x - 10000.0)
+}
+
+parameter "listSize:integer", "number of random items in list that gets sorted", "[50000,250000,500000,1000000]"
+parameter "extractComplexity:string", "complexity of extraction function", `["simple", "harder"]`
+
+substitute sortOptions, "sort with comparison ftn, strip sort",
+    `val sortCall = sort(theList, \(x,y:tupT) { dfn(x.c) < dfn(y.c) })`, "comparison",
+    `val XT = tuple(dist:float, inx:integer)
+     val sortCall = theList.{ [XT: dfn(this.c), index] }.modsort(\(x,y:XT) { x.dist < y.dist }).{ theList[inx] }`, "strip"
+
+// repeat each create+sort 4x and take min time. Time to generate list isn't counted.
+val loadModel = \imp() {
+    val randx = rand.New(rand.NewSource(1))
+    var tmin, tmax, ttotal: integer
+    each(i^1..4) {
+        val theList: list(tupT) = (1..listSize).{ [tupT: randx.Intn(200000)] }
+        val dfn = extractComplexity == "simple" ? distanceFrom : distanceFromSq
+        val t0 = time.Now()
+        sortOptions
+        var since = time.Since(t0)
+        ttotal += since
+        if(i == 1 || tmin > since) tmin = since
+        if(i == 1 || tmax < since) tmax = since
+    }
+    output "sort time:time to sort list:float:microsecond", "2.5e-4 * ttotal"
+    output "minmax diff:max - min timings:float:percent", "100.0*(tmax - tmin)/tmin"
+}
+
+query `
+loadModel()
+`

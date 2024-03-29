@@ -1,0 +1,42 @@
+// Create lists of increasing sizes, then measure the time to sort them.
+// Use the instantiating sort module and also the generic option.
+// Do this for integer, float, and a random tuple type.
+
+import "sort" melted
+import go "math/rand"
+
+substitute typesGenerics, "what and how to sort: elt type, generic or instantiated",
+    `val theList: list(integer) = (1..listSize).{ rand.Intn(200000) }; t0 = time.Now(); val sortCall = sort(theList)`, "list(integer)",
+    `val theList: list(float) = (1..listSize).{ (rand.Float64() - 0.5) * 100000.0 }; t0 = time.Now(); val sortCall = sort(theList)`, "list(float)",
+    `val tupT = extend tuple(a: string, b:integer, c:float) where {
+        method lithook = \mod(rval: integer) { a = ["a", "b", "c"][rval % 3]; b = rval; val tmp = cvt(rval, float)/125.7; c = tmp * tmp }
+     }
+     val theList: list(tupT) = (1..listSize).{ [tupT: rand.Intn(200000)] }; t0 = time.Now(); val sortCall = sort(theList, \(x,y:tupT) { x.b < y.b })`, "list(tupT)",
+    `val gncInt = GSLT(integer); var theList = cast((1..listSize).{ rand.Intn(200000) }, gncInt); t0 = time.Now(); modsort(theList)`, "list(integer) generic",
+    `val tupT = extend tuple(a: string, b:integer, c:float) where {
+        method lithook = \mod(rval: integer) { a = ["a", "b", "c"][rval % 3]; b = rval; val tmp = cvt(rval, float)/125.7; c = tmp * tmp }
+        method $< = \(x, y: tupT) { x.b < y.b }
+     }
+     val theList: list(tupT) = (1..listSize).{ [tupT: rand.Intn(200000)] }; t0 = time.Now(); val sortCall = sort(theList)`, "list(tupT)/ordered"
+
+
+parameter "listSize:integer", "number of random items in list that gets sorted", "[5000,10000,20000,40000,60000,80000,100000,150000]"
+
+// repeat each create+sort 4x and take min time. Time to generate list isn't counted.
+val loadModel = \imp() {
+    var t0:time.Time
+    var tmin, tmax, ttotal: integer
+    each(i^1..4) {
+        typesGenerics
+        var since = time.Since(t0)
+        ttotal += since
+        if(i == 1 || tmin > since) tmin = since
+        if(i == 1 || tmax < since) tmax = since
+    }
+    output "sort time:time to sort list:float:microsecond", "2.5e-4 * ttotal"
+    output "minmax diff:max - min timings:float:percent", "100.0*(tmax - tmin)/tmin"
+}
+
+query `
+loadModel()
+`

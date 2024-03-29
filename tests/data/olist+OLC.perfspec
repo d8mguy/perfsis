@@ -1,0 +1,84 @@
+// Test various aspects of olist and olistCached. For each different substn (olist plus OLC with and without flushing)
+// run 1M lookups with interspersed add+remove steps. Specifically, after grainSize lookups (currently set to 20K and 50K)
+// do the fraction of that number of add+rmv ops, the fraction in lookupsMultiple, expressed in %.
+// For various steady state sizes, run both olist and OLC, mixing phases of add+delete with lookup until 1M lookups are done.
+// The grainSize parameter controls how many phases, stepping from 16K to 64K lookups per phase
+// The lookupsMultiple parameter controls fraction of lookups vs add+delete
+
+import "olist" melted
+import "olistCached" melted
+import go "os"
+import go "log"
+
+// size 20K, 80K, 160K, 320K where K=1000
+parameter "listSize:integer", "steady state size of list", "(1..4).{20000*this*this}", "#{this/1000}K"
+parameter "lookupsMultiple:integer", "100x the fraction of lookups vs add+delete in each phase", "[10,30,90]"
+parameter "grainSize:integer", "number of lookups per phase", "[20000,50000]", "#{this/1000}K"
+
+// Make elements for oltype that depend on only one random vbl -- b and c attribs are derived
+val olElt = tuple(a: integer, b: string, c: float)
+val randomStrings = ["ekrj", "rs2 rs2", "ij3lkj i3", "xx kj yy 4", "iu 3o4i 55", "lkj iud wlkj 66"]
+val make1 = \(aa:integer) { [olElt: aa, randomStrings[aa % 6], 0.5 * aa] }
+
+substitute IMPLEM, "olist or OLC, with or without flushing before each lookup phase",
+    `val oltype = olist(olElt, integer, \(x:olElt){x.a}); val doFlush = \mod(ol:oltype) {}; val lgnm = "olcA.log"`, "olist",
+    `val oltype = olistCached(olElt, \(x:olElt){x.a}, 500); val doFlush = \mod(ol:oltype) { ol.flush() }; val lgnm = "olcA.log"`, "OLC with flushing",
+    `val oltype = olistCached(olElt, \(x:olElt){x.a}, 500); val doFlush = \mod(ol:oltype) {}; val lgnm = "olcA.log"`, "OLC without flushing"
+
+IMPLEM
+
+val loadModel = \mod(olst: oltype) {
+    var dbgfile = os.Create(lgnm)
+    val logger = log.New(dbgfile.ok, "", 0)     // see below; logging disables unwanted compiler optimizations
+    var lookupsDone = 0
+    var lookupTime = 0, insTime = 0, rmvTime = 0
+    while(lookupsDone < 1000000) {
+        var lkpvals:list(integer) = []
+        while(lkpvals.count < grainSize) {
+            lkpvals.pushb(rand.Intn(listSize*4))
+        }
+        var t0:time.Time = time.Now()
+        val allFound = lkpvals.{ make1(this) in olst }.count
+        var since = time.Since(t0)
+        lookupTime += since
+        lookupsDone += grainSize
+        logger.Println("allFound:", allFound)        // ensure compiler doesn't delete this
+        // The following hack disables merging the loop defining lkpvals (before time.Now() with the one using (after)
+        // Whether the each seql rewrite rule should be disabled by an intervening connected funcall is somewhat controversial.
+        // For now it isn't, hence the need for this hack.
+        if(rand.Intn(50) > 100) lkpvals[0] = 700
+        doFlush(olst)
+        // for the insert+remove phase, synth a list of random values that can't overlap with stuff in the list
+        // so we know they get added and removed
+        val insrmvCount = lookupsMultiple*grainSize/100
+        val arvals = (1..insrmvCount).{ make1(listSize*4 + rand.Intn(grainSize*5)) }
+        t0 = time.Now()
+        each(add^arvals) olst.insert(add)
+        since = time.Since(t0)
+        insTime += since
+        t0 = time.Now()
+        each(add^arvals) olst.remove(add)
+        since = time.Since(t0)
+        rmvTime += since
+    }
+    output "lookupTime:avg lookup time across lookup phase:integer:nanosecond", "round(1e-6*lookupTime)"
+    val insrmvScale = 1e-4*lookupsMultiple       // lookupsMultiple is *0.01 and we did 1e6 lookups
+    output "insertTime:avg insert time:integer:nanosecond", "round(insrmvScale * insTime)"
+    output "removeTime:avg remove time:integer:nanosecond", "round(insrmvScale * rmvTime)"
+}
+
+// Build the set to be tested, allowing elts between 0 and 3 times its size. Because there will be dups,
+// the actual set size will be less than sz.
+val build = \imp(sz:integer) -> oltype {
+    var ret = [oltype:]
+    while(ret.count < sz) {
+        val key = rand.Intn(sz*4)
+        unless(ret.keyIn(key)) ret.insert(make1(key))
+    }
+    ret
+}
+
+query `
+var theList = build(listSize)
+loadModel(theList)
+`

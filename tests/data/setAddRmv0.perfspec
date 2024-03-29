@@ -1,0 +1,78 @@
+// build a set to a target size, then run a loop that times adding or removing elts with approximately equal prob
+
+import "set" melted
+
+// State and method to compute mean and variance "online" using Welford algo (see wikipedia "algorithms for calculating variance").
+// Call on each sample with update; read out mean as attribute, population variance with popvnc method, sample variance
+// with samplevnc method.
+// This will reside in a module when mature.
+val welfordT = extend tuple(count, mean, M2: float) where {
+    method lithook = \mod() { count = 0.0; mean = 0.0; M2 = 0.0 }
+    // after count updates, population vnc is M2/count, sample vnc is M2/(count-1)
+    method update = \mod(nval:float) {
+        count += 1.0
+        val delta = nval - mean
+        mean += delta / count
+        val d2 = nval - mean
+        M2 += delta * d2
+    }
+    // should not be called if count < 1; this is not checked
+    method popvnc = \() { M2/count }
+    // should not be called if count < 2; this is not checked
+    method samplevnc = \() { M2/(count-1) }
+}
+
+val iset = set(integer)
+val build = \(sz:integer) -> iset {
+    var ret = [iset:]
+    each(i^1..sz) ret.add(rand.Intn(2 * sz))
+    ret
+}
+
+val addRmv = \mod(s:iset, tgtsz:integer) {
+    val elt = rand.Intn(2*tgtsz)
+    if(elt in s) s.remove(elt) else s.add(elt)
+}
+
+parameter "targetSize:integer", "steady state size of set", "(10..19).{pow(2,this)}", 0, 0
+
+val loadModel = \mod(s:iset) {
+    // don't bother to track max distance of random walk
+    // run addRmv enough times to establish an avg and stop when the vrnc gets small enough
+    var t0:time.Time
+    var loopdur = 0
+    var vncSt = [welfordT:]
+    // Start with 1000 msmts
+    each(cnt^1..1000) {
+        t0 = time.Now()
+        s.addRmv(targetSize)
+        val since = time.Since(t0)
+        vncSt.update(since.to_f)
+        loopdur += since
+    }
+    // Continue until delta(variance) gets small enough
+    var lastVnc = 0.0
+    while(abs(vncSt.popvnc - lastVnc) > 0.01 && vncSt.count < 10000) {
+        lastVnc = vncSt.popvnc
+        t0 = time.Now()
+        s.addRmv(targetSize)
+        val since = time.Since(t0)
+        vncSt.update(since.to_f)
+        loopdur += since
+    }
+    output "loopdur.to_f / vncSt.count"
+}
+
+import "olist" melted
+import "splay" melted
+
+substitute SET "Gomap(integer, boolean)", "set->map implementation",
+    "olist(integer)", "set->olist implementation",
+    "splay(integer)", "set->splay tree implementation"
+
+// xxx
+query `
+var theSet = build(targetSize)
+applyST(SET, theSet)
+loadModel(theSet)
+`

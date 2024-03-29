@@ -1,0 +1,16 @@
+
+/* component MakeChart */
+.LegendItem {
+    font-size: smaller;
+}
+
+/* component CompareOptions */
+.CompareOptions {
+    background-color: cornsilk;
+    position: absolute;
+    border: #f0f01a 2px solid;
+    padding: 3px;
+    left: 100px;
+    top: 200px;
+    z-index: 5;
+}

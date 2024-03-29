@@ -1,0 +1,1566 @@
+// Webgen spec for perfsis front end
+
+// This one for making changes
+
+// There are two modes at top level that we call manage and visualize. Both require a selected perfspec, so the state
+// machine starts with that. Manage has to do with viewing and updating the available
+// data such as by running a driver on a compiled perfspec to extend the data along some dimension such as runtime, seed, etc.
+// Visualize allows you to select specific charting options from the cube defined by the perfspec's parameters and outputs to
+// create a chart. The pfsData.json of a given perfspec drives what selection
+// options you get for visualization, including tooltips, overview text, labels, etc.
+
+// ATTENTION: some of the object defns below are used (as d8m defns) in the backend code. If any of those change here, they
+// need to be changed by hand there.
+
+// Get the perfsis types: Parameter, Output, etc.
+import "perfsis/types" melted
+
+// Then there are some more type defns for front end work.
+
+// This has info on visual aspects of a ChartPart
+val Visual = tuple(
+	geom: string,        // should be 'Line', 'Bar', 'Dot' as in the UI
+	thickness: integer,  // 0 to 4
+	hue: integer        // 0 to 360 for HSL color repn
+)
+
+// External data could come from any kind of data source; the cube plus implicit define the csv file structure; contexts
+// is like for PfsData but only one version. If implicit is true, first columns of the corresponding csv file do not hold the values
+// of parameter elements. This can save some space but makes the csv harder to decipher. It's not an option for PfsData, which
+// always has the parameter values explicit. The accessor is supposed to tell provenance of the data, it is unused for now.
+val ExternalData = tuple(
+    cube: Cubedef,
+    contexts: list(Kvpair),
+    implicit:boolean,
+    accessor: string
+)
+
+// Users can assemble VersionSets as a sequence of perfspec versions with identifier & descrn that explains
+// what the sequence compares. This permits to extend by 1 the number of dimensions of a chart part, and thereby compare and
+// hopefully understand whatever measurement aspect the sequence represents. Note that the description
+// can sometimes be derived from strings in the context of its constituent elements if those are managed correctly.
+val VersionSet = tuple(
+    ident: string,		// name of this version set
+    description: string,
+    elements: list(integer)         // these are version #'s
+)
+
+// This defines a set of lines/bars/dots from a single data source. A ChartDesc has 1 or more of these, commonly 1.
+// They drive data extraction in doChart, the server part of drawing a chart. The extracted data is then sent to the client
+// where it goes to a component that draws the chart.
+val ChartPart = tuple(
+    source: string,             // "" for perfspec cube (at index 0), else identifier in frontendInfo.externals
+    // allDimsIndices are -1,-2,-3 for abscissa, clickable, multi. And >= 0 for specific bindings.
+    allDimsIndices: list(integer),
+    outputs: list(integer),
+    compareWithSubstn: list(integer),      // only in part 0; if != [] encodes the selected index of each substn
+    appnc: Visual     // note: these are ignored for getting chart data but needed for saving charts.
+)
+
+// This gets sent to the server to get a ChartData; it's also the type used to save charts. The description
+// and the appnc slot of ChartPart isn't needed for ChartTrans but is needed for a saved chart.
+// For now, charts are single axis and limited to two parts, the first of which is the base part, data comes from
+// the perfspec proper; the second part, if present, comes from ExternalData.
+val ChartDesc = tuple(
+    title: string,           // this is the top line in the drawn chart (above the legend)
+    identifier: string,      // the identifier for saving (spaces ok, special chars maybe not)
+    parts: list(ChartPart),
+    unit: string,
+	vsetIndex: integer,
+	outsAsAbscissa: boolean,
+	// next 4 allow direct control of y axis range
+	setYAxisLow: boolean,
+	setYAxisHigh: boolean,
+	YAxisLow: string,             // these are ignored unless the corresponding booleans are set
+	YAxisHigh: string,            // and they're floats, but javascript cnvn rules are so terrible that I've changed the type
+	// prop for comparison option when exactly two series: integers are 0-4 for none + [ratio,diff]*[1-2,2-1]
+	compareOptions: integer       // will be 0 unless parts constitute 2 series, ie 2 in part 0 or 1+1 in parts 0 and 1.
+)
+
+// The server responds to a ChartTrans request with a ChartData. The first of its series comes from the perfspec; others
+// (if any) from ExternalData. Each elt of series is an object with slot named "x" and 1 or more slots named "y*" where
+// the * is 1 or 2 letters that address multiple lines per source and multiple sources. Specifically, y values from the
+// perfspec are named y0, y1, etc and y values from externals have a letter added after the y: a for the first, b for the
+// second, and so on.
+// In addition, the the chart data formatter handles the compareOption; if comparison labels are wanted for a given series,
+// it puts a prop named "compare" into the appropriate series.
+// The outputElts name the outputs, first for perfspec and then for externals. MultiElts and clickElts are used only for perfspec.
+object ChartData = {
+    series: list(object)
+    multiElts: list(string)
+    outputElts: list(list(string))
+    clickElts: list(string)
+	abscissaDesc: string
+	title: string
+}
+
+// This lives in the frontend.json file that the frontend maintains in each perfspec working dir.
+// Although there's no explicit link, the active Frontend will always be for the PfsData in activePS
+val Frontend = tuple(
+    externals: list(ExternalData),
+    vsets: list(VersionSet),
+    savedCharts: list(ChartDesc),
+    preferredVersion: integer       // initially 0 but can be set by user
+)
+
+// This is for the dropdown before we've selected a Perfspec; the descrn part should be flashed when a perfspec is selected
+// so the user can see it before clicking the select button.
+object PerfspecSketch = {
+    ident: string
+    descrn: string
+}
+
+// State for manage mode and generally
+state mainMode: integer              // 0: manage, 1: visualize
+state manageMode: integer            // submode of manage: 0 for create, 1 for import
+state editMode: integer              // submode of visualize: 0 for edit, 1 for show chart
+state reason: string                 // for textbox a/w create of runtime & compiler
+state details: string                // same
+
+state frontendInfo: Frontend
+state activePS: PfsData              // full details on active perfspec once one is selected
+state theChart:ChartData             // set via chartTrans, passed to MakeChart
+state chartDesc: ChartDesc           // params for theChart; initzd in the UI, sent to chartTrans and to MakeChart
+state allDimsIndices:list(integer)   // -1,-2,-3 for [abscissa, click, multiseries] else index of elt
+
+
+// The onLoad transition runs once after the app loads. It causes the server to load the list of available perfspecs from
+// a directory given in the cmd line. The selectTrans also happens early.
+state allPerfspecs: list(PerfspecSketch)    // perfspec options for dropdown
+state selectedPSIndex: integer = "-1"       // index for selectTrans
+transition onLoad "loadPFS" => GET() then doLoad response {allPerfspecs}
+
+// selectTrans gets a perfspec name and sends back detailed info about it
+transition selectTrans "select" => GET(pfsname: string) then doSelect response {activePS, frontendInfo, allDimsIndices}+finishSelect(frontendInfo, activePS)
+
+javascript {
+    function finishSelect(newFE, aps) {
+        const cube = aps.cube;
+        if (cube.outputs.length > 1 && cube.params.length === 0 && aps.substns.length === 0 && newFE.vsets.length === 0) {
+            setOutsAsAbscissa(true);
+            setOutsSelected([...Array(cube.outputs.length).keys()])
+            setChartSetupState(1);
+        }
+        setFrontendInfo(newFE)
+        setEditMode(0)
+        //console.log("FinSel:", chartSetupState)
+    }
+
+    // This mimics in js the method defined in d8m
+    function index2Elts(pfs, inx) {
+        const nParams = pfs.cube.params.length
+        const nSubstns = pfs.substns.length
+        if (inx < nParams) return pfs.cube.params[inx].elements
+        else if(inx < nParams + nSubstns) return pfs.substns[inx - nParams].elements
+        else return []
+    }
+}
+
+// Create a version set by filling out a panel with CreateNewHMStep1 in the local components dir, then running this transition to record it
+transition VSetNewTrans "vset" => GET(ident: string, desc: string, elements:string) then doVSet
+
+// Whereas creating a new external involves 2 transitions. First, we get the file/URI descrn and send that file
+// to the client for filling in column info, etc. Then we finalize when the client sends back the filled in info.
+state tableDataExternal: list(object);      // list(list(string)) customized for data cube found
+state newExternalData: ExternalData;
+transition ExternalNew1Trans "external1" => GET(filename: string, filedir: string)
+    then doExternal1 response {tableDataExternal} or error
+
+transition ExternalNew2Trans "external2" => POST(ident:string, description: string, nParams: integer, idents: list(string), cols: list(integer), suppressRows: list(integer))
+    then doExternal2 response {newExternalData}+push2Frontend(newExternalData)
+
+transition PrefVerTrans "prefVersion" => GET(nversion:string) then doPrefVersion
+
+state vsetInADI: integer = "-1"    // index of vrsnset in ADI, -1 if no vrsnset active
+state compareWith: list(integer)
+state vsetIndex: integer           // index in frontendInfo.vsets; valid when a vrsnset is in use
+state yaxisEnables: list(boolean)     // this and next 2 for manual control of y axis
+state yaxisValue0: string = "0"       // float doesn't work well in a textbox; convert by hand
+state yaxisValue1: string = "0"
+state tmpChartData:ChartData        // from server, goes into data slot of active chart
+transition chartTrans "chart" => POST(params: ChartDesc) then doChart
+    response {tmpChartData}+setupChartData(tmpChartData)
+
+// SaveTrans saves chart info in the frontendInfo of a perfspec, so it only needs the params.
+transition saveTrans "save" => POST(params: ChartDesc) then doSaveAction
+
+// FullsaveTrans saves chart params AND DATA to a file named in the transition. Such charts can be displayed with a call
+// to RechartsWrapper0 independent of their perfspec (ie data source). Because the type of the data part can't be described in d8m,
+// we save one chart per file in json, the file is a single json representation of an object with props params, data, filename.
+// We get the ChartData by re-running the doChart code with the given params. (It's in a private method extractChartData.)
+// Note that params.description is the identifier for saved charts in the fronendInfo list, the one local to each perfspec.
+// The filename slot allows for a naming scheme separate from that.
+transition fullsaveTrans "fullsave" => POST(params: ChartDesc, perfspecName:string) then doFullsave
+
+components "perfsisComponents"
+components ThinLine, ThickerLine, ThickLine
+components Button       // this may be a webgen bug (the need to include this line)
+
+// JS to support management UI
+javascript {
+
+    // hook for finish external transition
+    function push2Frontend(xd) {
+        const fei0 = {}
+        Object.assign(fei0, frontendInfo)
+        fei0.externals.push(xd)
+        console.log("P2FE", xd, fei0)
+        setFrontendInfo(fei0)
+    }
+    // hook for chartTrans: copy data into the correct elt of activeCharts
+    function setupChartData(newdata) {
+        console.log("setupChartData:", newdata)
+        setTheChart(newdata);
+        setEditMode(1)
+    }
+    // run the transition to tell the server about the new vrsnset, and update locally
+    function finishNewVSet(ident, descrn, elts) {
+        const fei0 = {}
+        Object.assign(fei0, frontendInfo)
+        let eltsAsString = elts.join(",")
+        fei0.vsets.push({ident: ident, description: descrn, elements: elts})
+        console.log("Finish vset:", fei0)
+        setFrontendInfo(fei0)
+        VSetNewTrans(ident, descrn, eltsAsString)
+    }
+
+    // return data for versions table
+    function generateVersionData() {
+        if (!('version' in activePS)) return [];
+        //console.log("GVD: ", activePS.contexts)
+        const cxtsByIndex = [...Array(activePS.version + 1).keys()].map(inx => new Array(0));
+        activePS.contexts.forEach(kvp => {
+            kvp.value.forEach((s, index) => {
+                if (s !== "") cxtsByIndex[index].push(`${kvp.key}:${s}`)
+            })
+        })
+        // 2 cols: indices, string of keys+values
+        return cxtsByIndex.map((kv, index) => [index, kv.join(", ")])
+    }
+    // return data for version sets table (not currently editable)
+    function generateVSetsData() {
+        if (!('vsets' in frontendInfo)) return [];
+        function detailsPopup(inx) {
+            // Note: the following is a standin for a tooltip component that I need to write
+            console.log(`details for ${inx}: `, frontendInfo.vsets[inx].description)
+        }
+        console.log("GHDD:", frontendInfo)
+        // 3 cols: ident, button for descrn, string of version #'s, arrayed in a grid of buttons
+        return frontendInfo.vsets.map((vrsnset, index) => {
+            return [vrsnset.ident, <Button label="Details" clickfn={() => detailsPopup(index)} />,
+                <HButtons menulabels={vrsnset.elements} values={vrsnset.elements} clickfn={() => {}} />]
+        })
+    }
+    // return data for externals table (not currently editable)
+    function generateExternalsData() {
+        if (!('externals' in frontendInfo)) return [];
+        console.log("GXD:", frontendInfo)
+        function describeExternalsPopup(inx) {
+            console.log("desc x pop", inx)
+            return ""
+        }
+        function detailsExternalsPopup(inx) {
+            console.log("details x pop", inx)
+            return ""
+        }
+        return frontendInfo.externals.map((extrn, index) => {
+            return [extrn.cube.ident,
+             <Button label="Description" clickfn={() => describeExternalsPopup(index)} />,
+             <Button label="Details" clickfn={() => detailsExternalsPopup(index)} />]
+        })
+    }
+    // return data for save charts table
+    function generateSavedChartsData() {
+        if (!('savedCharts' in frontendInfo)) return [];
+        return frontendInfo.savedCharts.map((cdesc, index) => {
+            return [<Textbox value={cdesc.identifier} />,
+                    <Button label="Save With Data" clickfn={e => fullsaveTrans(cdesc, activePS.cube.ident)} />]
+        })
+    }
+    // set preferred version and comm to server about it
+    function setFEPV(pv) {
+        const pvi = parseInt(pv)
+        const fei0 = {}
+        Object.assign(fei0, frontendInfo)
+        fei0.preferredVersion = pvi
+        setFrontendInfo(fei0)
+        PrefVerTrans(pv)
+    }
+}
+
+css {
+    .ThinBorder {
+        border: solid black 1px;
+        margin: 3px;
+    }
+}
+
+pagespec mgmtPage = Div(height~"450px") {
+    IncludeIf("() => !('version' in activePS)") {
+        Text("Select a perfspec to get started.")
+    }
+    IncludeIf("() => 'version' in activePS") {
+        Boxspring(dir~"V" minheight~"450px" springV~"Inner") {
+            Div() {
+                // start with the vsets and button to create new one
+                GridTable(width~"450px",
+                    tableLabel~"Versions to Compare:",
+                    columnWidths~"1fr 1fr 3fr",
+                    data~"generateVSetsData()"
+                )
+                CreateNewVSetStep1(activePS~"activePS", createfn~"finishNewVSet" )
+                IncludeIf("() => activePS.version >= 1") {
+                    Textbox(label~"Set Preferred Version" value~"() => frontendInfo.preferredVersion" changefn~"e => setFEPV(e.target.value)")
+                }
+            }
+            Div() {
+                // Then, the externals, also as a table plus a "create new" button
+                GridTable(width~"450px",
+                    tableLabel~"External Data Series:",
+                    columnWidths~"1fr 1fr 1fr",
+                    data~"generateExternalsData()"
+                )
+                CreateNewExternalStep1(tableDataExternal~"tableDataExternal"
+                    frontendInfo~"frontendInfo"
+                    setFrontendInfo~"setFrontendInfo"
+                    trans1~"ExternalNew1Trans"
+                    finishExternal~"ExternalNew2Trans")
+            }
+
+            // Next, save charts, with an option to do a full save
+            GridTable(width~"450px",
+                tableLabel~"Saved Charts",
+                columnWidths~"1fr 1fr",
+                data~"generateSavedChartsData()")
+        }
+    }
+}
+
+
+// SVs for chart setup, ie to support editPage; they get copied into chartDesc when committing.
+state chartSetupState: integer       // run a FSM for chart setup
+state curHue: string = "0"
+state outsAsAbscissa: boolean
+state outsSelected:list(integer)
+state chartTitle: string
+state chartIdent: string
+state curGeom:string = "Line"
+state curThick: integer
+state paramsSaved: boolean           // current status for chart being edited
+state editBecause: string            // how we got to edit page (most recently)
+state compatUnits: boolean = "true"
+
+// This and the next two are pll arrays for params of externals. They're set up to allow multiple externals to complement
+// the base chart but for now, the server handles at most one external.
+state externalsSelected: list(integer)
+state selXParams: list(integer)
+state selXOutputs: list(object)
+state selXHues: list(string)
+state selXThicks: list(string)
+state compareStringsOption: integer
+
+// JS functions to support editPage
+javascript {
+    // wrap setMainMode for logging
+    function setMainMode0(value) {
+        console.log("SMM:", value, activePS);
+        setMainMode(value)
+    }
+
+    // this builds on the auto-generated setActivePS since it needs to also set up a prototype chart.
+    // Value can be -1 to clear or an index into allPerfspecs, which initiates a selectTrans.
+    function setActivePS0(value) {
+        const v0 = allPerfspecs[value];
+        setSelectedPSIndex(value);
+        setOutsAsAbscissa(false);
+        setMainMode0(1);        // set mainmode to visualize
+        setOutsSelected([]);
+        setChartSetupState(0);
+        setChartTitle("");
+        setChartIdent("");
+        setTheChart([{series:[], clickElts: []}]);
+        selectTrans(v0.ident);
+        setCompareWith([])
+    }
+    // generate the values for the abscissa selector from activePS. A bit diff from just the names of allDims.
+    function abscissaValues() {
+        //console.log("AV:", allDimsIndices)
+        if ('cube' in activePS) {
+            let values = activePS.cube.params.map(p => p.ident)
+            for (const sn of activePS.substns) {
+                if (sn.elements.length > 1) values.push("substitution:" + sn.ident);
+            }
+            // named vsets then "all versions"
+            for (const vset of frontendInfo.vsets) values.push("version:" + vset.ident)
+            if (activePS.version > 1) values.push("all versions")
+            if (activePS.cube.outputs.length > 1 && activePS.cube.params.length === 0) {
+                values.push("outputs")
+            }
+            return values;
+        } else return []
+    }
+
+    // Changefn for abscissa dropdown. Modified version of setAllDimsIndicesAt because we need to clear -1 if it already exists.
+    // Also to adjust if a vset is selected.
+    // Besides allDimsIndices, this updates chartSetupState.
+    function abscissaHandler(index) {
+        const tmp = allDimsIndices.slice();
+        const curAbscissa = tmp.indexOf(-1)
+        if (curAbscissa >= 0) tmp[curAbscissa] = 0
+        const firstVsetIndex = activePS.cube.params.length + activePS.substns.length
+        const nVsets = frontendInfo.vsets.length
+        setOutsSelected([])
+        let newSetupValue = 1;
+        if (index >= firstVsetIndex + nVsets && activePS.cube.params.length === 0) {       // must be output
+            setOutsAsAbscissa(true)
+            newSetupValue = 2
+            setOutsSelected([...Array(activePS.cube.outputs.length).keys()])
+        } else if (index >= firstVsetIndex) {         // selecting a VrsnSet or all versions?
+            tmp[firstVsetIndex] = -1
+            let vsi = index - firstVsetIndex
+            if (vsi >= nVsets) vsi = -1      // this codes for "all versions"
+            setVsetIndex(vsi)
+            setVsetInADI(0)
+        } else {
+            tmp[index] = -1;
+            if (tmp.length > firstVsetIndex) tmp.pop()
+            setVsetInADI(-1)
+        }
+        // console.log("Absc hndlr", tmp, allDimsIndices)
+        setAllDimsIndices(tmp);
+        setExternalsSelected([]);
+        setChartSetupState(newSetupValue);
+        setCompareStringsOption(0);
+    }
+
+    // Table to bind outputs
+    function generateOutputsTable() {
+        function generateRow(outp, inx) {
+            const curUnitsLeft = outsSelected.length > 0 ? activePS.cube.outputs[outsSelected[0]].unit : '';
+            // make a click handler for given output
+            function clickCheck(positive) {
+                if (positive) { let tmp = outsSelected.slice(); tmp.push(inx); setOutsSelected(tmp) }
+                else setOutsSelected(outsSelected.filter(x => x !== inx))
+                setChartSetupState(2);
+            }
+            return [
+                <span>{outp.ident}</span>,
+                <span>
+                    <Checkbox checked={outsSelected.includes(inx)}
+                        clickfn={e => clickCheck(e.target.checked)}
+                        disabled={outsSelected.length > 0 && !outsSelected.includes(inx) && (curUnitsLeft === '' || curUnitsLeft !== outp.unit)}
+                    />
+                </span>
+            ];
+        }
+        let rslt = (('cube' in activePS) ? activePS.cube.outputs : []).map((outp, inx) => generateRow(outp, inx));
+        return rslt;
+    }
+
+    function baseIsNumeric() {
+        const curAbscissa = allDimsIndices.indexOf(-1);
+        return curAbscissa >= 0 && curAbscissa < activePS.cube.params.length
+    }
+
+    // predicate true if the external given has any param whose unit matches the unit of the selected abscissa.
+    // The comparison is on strings, so "" matches ""
+    function hasCompatibleUnit(extrnl) {
+        const curAbscissa = allDimsIndices.indexOf(-1)
+        if (curAbscissa < 0 || curAbscissa >= activePS.cube.params.length) return false;
+        const absUnit = activePS.cube.params[curAbscissa].unit;
+        return extrnl.cube.params.findIndex(prm => prm.unit === absUnit)
+    }
+
+    // generate the lines of a GridTable with idents of externals and a checkbox for selecting them. If outsAsAbscissa is
+    // true, filter to show only externals with categorical abscissas, else only numeric (ie having params).
+    function generateExternalsTable() {
+        function clickCheck(positive, index) {
+            if (positive) {
+                let tmp = externalsSelected.slice()
+                tmp.push(index)
+                setExternalsSelected(tmp)
+                let tmp3 = selXHues.slice();
+                tmp3.push("0");
+                setSelXHues(tmp3);
+                let tmp4 = selXThicks.slice();
+                tmp4.push("0");
+                setSelXThicks(tmp4);
+                if (outsAsAbscissa) {
+                    let tmp5 = selXOutputs.slice()
+                    let nElts = frontendInfo.externals[index].cube.outputs.length;
+                    tmp5.push([...Array(nElts).keys()])
+                    setSelXOutputs(tmp5)
+                } else {
+                    let tmp2 = selXParams.slice()
+                    tmp2.push(0)
+                    setSelXParams(tmp2)
+                }
+            } else {
+                let inxOfInx = externalsSelected.indexOf(index)
+                let xsel = externalsSelected.slice()
+                xsel.splice(inxOfInx, 1)    // delete the elt here
+                setExternalsSelected(xsel)
+                // same for selXParams
+                let tmp = selXParams.slice()
+                tmp.splice(inxOfInx, 1)
+                setSelXParams(tmp)
+                tmp = selXHues.slice();
+                tmp.splice(inxOfInx, 1)
+                setSelXHues(tmp);
+                tmp = selXThicks.slice();
+                tmp.splice(inxOfInx, 1)
+                setSelXThicks(tmp);
+            }
+        }
+        let rslt = [];
+        // oaaCount: -1 if numeric, else # outputs
+        const oaaCount = outsAsAbscissa ? outsSelected.length : -1
+        if ('externals' in frontendInfo) {
+            const filtered = []
+            frontendInfo.externals.forEach((ext, index) => {
+                if (oaaCount < 0 && ext.cube.params.length > 0) filtered.push(index)
+                else if (ext.cube.outputs.length === oaaCount) filtered.push(index)
+            })
+            filtered.forEach(extinx => {
+                const ext = frontendInfo.externals[extinx];
+                rslt.push([<span>{ext.cube.ident}</span>,
+                    <span>
+                        <Checkbox checked={externalsSelected.includes(extinx)}
+                            clickfn={e => clickCheck(e.target.checked, extinx)}
+                            disabled={oaaCount < 0 && compatUnits && !hasCompatibleUnit(ext)}
+                        />
+                    </span>])
+            })
+            //console.log("FEIX;0", frontendInfo.externals, filtered, rslt.length)
+        }
+        return rslt
+    }
+
+    // generate a list of controls for each externalsSelected that allow a user to define its charting parameters.
+    function selectedExternals() {
+        if (chartSetupState === 0) return []
+        return externalsSelected.map((inx, inxInSelX) => {
+            const extrnl = frontendInfo.externals[inx];
+            const paramOptions = extrnl.cube.params.map(x => x.ident);
+            const outputs = extrnl.cube.outputs.map(x => x.ident);
+            const outchecks = outputs.map((nm, inx2) => {
+                function clickCheck(positive, index) {
+                    let tmp = selXOutputs.slice()       // selXOutputs is list(list(integer))
+                    if (positive) {
+                        if (Array.isArray(tmp[inxInSelX])) {
+                            tmp[inxInSelX].push(index)
+                        } else {
+                            tmp[inxInSelX] = [index]
+                        }
+                    } else {
+                        let tmp2 = tmp[inxInSelX].filter(x => x !== index);
+                        tmp[inxInSelX] = tmp2
+                    }
+                    setSelXOutputs(tmp)
+                }
+                return [<Checkbox
+                    label={nm}
+                    checked={Array.isArray(selXOutputs[inxInSelX]) && selXOutputs[inxInSelX].includes(inx2)}
+                    clickfn={e => clickCheck(e.target.checked, inx2)} />]
+            })
+            return [
+                <div>
+                    <div style={{textAlign:"center", paddingBottom:"4px"}}>{extrnl.cube.ident}</div>
+                    <GridLayout width="280px" columns="2fr 7fr">
+                        <div>
+                            <DropdownValue options={paramOptions} selectValue={selXParams[inxInSelX]} changefn={v => setSelXParamsAt(v, inxInSelX)} />
+                            <GridTable width="120px" columnWidths={"1fr"} data={outchecks} />
+                        </div>
+                        <div>
+                            <HueSelectSlider value={selXHues[inxInSelX]} changefn={e => setSelXHuesAt(e.target.value, inxInSelX)} />
+                            <div>
+                                <HRadioButton labels={[<ThinLine />, <ThickerLine />, <ThickLine />]} values={['0', '1', '2']}
+                                    initval={selXThicks[inxInSelX]} clickfn={e => setSelXThicksAt(e.target.value, inxInSelX)} />
+                            </div>
+                        </div>
+                    </GridLayout>
+                </div>
+            ]
+        })
+    }
+
+    // true if the compare button should be disabled
+    function disableCompare() {
+        const click = allDimsIndices.indexOf(-3)
+        if (click >= 0) return true
+        const multi = allDimsIndices.indexOf(-2)
+        if (multi >= 0) return true
+        //console.log("disCmp", outsSelected.length, externalsSelected.length)
+        return outsSelected.length + externalsSelected.length > 2
+    }
+
+    // Generate data for the Compare? button, enabled if there's 1 dataseries. We need to return 2 things so we use an object, see retval.
+    // The code here is kinda complicated, mainly because it's slightly challenging to accomodate any number of substns. Also
+    // because of running into some of "javascript: the bad parts".
+    function genCompareOptions() {
+        let retval = {srclabels:[], srcvalues:[]}
+        if (allDimsIndices.indexOf(-3) >= 0 || allDimsIndices.indexOf(-2) >= 0 || outsSelected.length + externalsSelected.length >= 2) return retval
+        if (!('substns' in activePS)) return retval
+        const allSubstns = activePS.substns.map(sb => sb.elements)
+
+        // Generate options with all the possible combinations of substns, then filter the selected one.
+        // The following is from stackoverflow 12303989. Note that it doesn't work if called with [], see below.
+        function* cartesian(head, ...tail) {
+          const remainder = tail.length > 0 ? cartesian(...tail) : [[]];
+          for (let r of remainder) for (let h of head) yield [h, ...r];
+        }
+        // Unbelievable that this isn't built into js somehow. Note that it's not even correct in a generic sense, it
+        // only works if === works for the elements of the arrays.
+        function equalArrays(a1, a2) {
+            if (a1.length !== a2.length) return false
+            let retval = true
+            for (let inx = 0; inx < a1.length; inx++) {
+                if (a2[inx] !== a1[inx]) {
+                    retval = false
+                    break
+                }
+            }
+            return retval
+        }
+        // Generate the indices for generating labels and also for use in coded string form.
+        const allIndices = allSubstns.map(lst => [...Array(lst.length).keys()])
+        const crossprodIndices = allIndices.length === 0 ? [] : [...cartesian(...allIndices)]
+        const allPairs = crossprodIndices.map(iset => iset.map((value, index) => allSubstns[index][value]))
+        const nParams = activePS.cube.params.length
+        const nSubstns = allSubstns.length
+        const actualSubstns = allDimsIndices.slice(nParams, nParams + nSubstns)
+        // Now find the set of indices that matches the base dataseries so we can delete it.
+        // note: this is crossprodIndices.indexOf(actualSubstns) but extensional which isn't what js does
+        let i2del = -1
+        for (let inx = 0; inx < crossprodIndices.length; inx++) {
+            if (equalArrays(crossprodIndices[inx], actualSubstns)) {
+                i2del = inx;
+                break;
+            }
+        }
+        //console.log("GCO", allSubstns, actualSubstns, crossprodIndices, allPairs, i2del)
+        if (i2del >= 0) {
+            crossprodIndices.splice(i2del, 1)
+            allPairs.splice(i2del, 1)
+        }
+        retval.srclabels = allPairs.map(elt => elt.join("+"))
+        retval.srclabels.unshift("Nothing")
+        retval.srcvalues = crossprodIndices.map(elt => elt.join("#"))
+        retval.srcvalues.unshift("")
+        return retval
+    }
+
+    function genCmpOptsDD(e) {
+        // take care: "".split("#") is not [] but [""]
+        let indices = []
+        const v = e.target.value
+        if (v !== "") indices = v.split("#").map(elt => parseInt(elt))
+        setCompareWith(indices)
+        console.log("ddv clicked, got", indices)
+    }
+
+    const vrblabels = ['None', 'x/y', 'x - y', 'y/x', 'y-x']
+
+    function genCmpOptsRB(e) {
+        const selinx = vrblabels.indexOf(e.target.value)
+        if (selinx === 0 || compareWith.length > 0 || externalsSelected.length > 0) setCompareStringsOption(selinx)
+        if (selinx === 0) setCompareWith([])    // no compare implies no compare with
+        console.log("radiobuttons clicked, got", selinx, e.target.value, compareWith)
+    }
+
+    // use the following thresholds to control multiseries and clickable setup
+    function maxPerGeom(geom) {
+        if (geom === 'Line') return 8
+        else if (geom === 'Bar') return 4
+        else return 20
+    }
+    const maxClickable = 20
+
+    // Set an elt of allDimIndices to a new value, enforcing cntts on multiplicity.
+    // This doesn't handle abscissa, only "other cube dimensions"
+    function updateDimIndices(v, inx) {
+        let di = allDimsIndices.slice();
+        if (v === -2) {
+            let xstg = di.findIndex(x => x === -2)
+            if (xstg >= 0) di[xstg] = 0
+        }
+        if (v === -3) {
+            let xstg = di.indexOf(-3)
+            if (xstg >= 0) di[xstg] = 0
+        }
+        const firstvsetIndex = activePS.cube.params.length + activePS.substns.length
+        if (inx >= firstvsetIndex && v === -1) {
+            // deselected VrsnSet, fix
+            console.log("updateDimIndices:", di)
+            di.pop()
+            setVsetInADI(-1)
+        } else if (inx >= firstvsetIndex) {
+            di[inx] = v
+            setVsetIndex(-1)       // this is "all versions"
+        } else {
+            di[inx] = v;
+        }
+        console.log("UDI: b4/aftr", inx, v, allDimsIndices, di)
+        setAllDimsIndices(di)
+        setCompareStringsOption(0)      // clear comparison
+        setCompareWith([])
+    }
+
+    // Generate a table that lets the user select all the not-yet-defined dimensions, which can be from params,
+    // substitutions, vsets, or the possibility of adding a second output specifically for comparison purposes.
+    // Each entry consists of the identifier describing what thing (param, substn, etc) we're binding and a DDV
+    // with the options for that thing. In most cases, the options will include a selected elt, multiseries, or clickable.
+    // For the comparison, the options are other outputs, substns, vsets.
+    // Note that in most cases, the action happens by setting allDimsIndices.
+    // We suppress whichever "thing" was already selected as the abscissa.
+    function generateOCDTable() {
+        if (!('cube' in activePS)) return [];
+        function addDropdown(inx, prm) {
+            let ddvopts = prm.elements.slice();
+            const nElts = ddvopts.length;
+            let ddvvals = [...Array(nElts).keys()]
+            if (allDimsIndices[inx] === -1) { return null }
+            else {
+                if (nElts <= maxClickable) {
+                    ddvopts.unshift("Clickable");
+                    ddvvals.unshift(-2);
+                }
+                if (nElts <= maxPerGeom(curGeom)) {
+                    ddvopts.unshift("Multiseries");
+                    ddvvals.unshift(-3);
+                }
+            }
+            return <DropdownValue options={ddvopts} values={ddvvals}
+                                  selectValue={allDimsIndices[inx]}
+                                  changefn={v => updateDimIndices(v, inx)}
+            />
+        }
+        function addVSetDDV(inx, vset) {
+            const nElts = vset.elements.length;
+            let optionlbl = "Select to add...";
+            let ddvopts = [], ddvvals = [];
+            if (nElts <= maxClickable) {
+                ddvopts.unshift("Clickable");
+                ddvvals.unshift(-2);
+            }
+            if (nElts <= maxPerGeom(curGeom)) {
+                ddvopts.unshift("Multiseries");
+                ddvvals.unshift(-3);
+            }
+            return <DropdownValue options={ddvopts} values={ddvvals}
+                                  selectValue={allDimsIndices[inx]}
+                                  optionLabel={optionlbl}
+                                  changefn={v => updateDimIndices(v, inx)}
+            />
+        }
+        let names = activePS.cube.params.map(prm => prm.ident);
+        let nParams = activePS.cube.params.length;
+        let nSubstns = activePS.substns.length;
+        let ddvs = activePS.cube.params.map((prm, inx) => addDropdown(inx, prm))
+        activePS.substns.forEach((substn, inx) => {
+            ddvs.push(addDropdown(inx+nParams, substn));
+            names.push(substn.ident)
+        })
+        nParams += nSubstns
+        if (vsetInADI === -1) {        // if VrsnSet not active, allow it as a multi option
+            // note that nothing happens here if no vsets
+            frontendInfo.vsets.forEach((vset, inx) => {
+                const fullIndex = inx+nParams;
+                if (allDimsIndices[fullIndex] != -1) {
+                    ddvs.push(addVSetDDV(fullIndex, vset))
+                    names.push(vset.ident)
+                }
+            })
+            if (activePS.version > 0) {
+                const vset = {ident:"all versions", description: "", elements: [...Array(activePS.version+1).keys()]}
+                ddvs.push(addVSetDDV(nParams, vset))
+                names.push(vset.ident)
+            }
+        }
+        // If conditions warrant, add a compare with row
+        if (!outsAsAbscissa && outsSelected.length === 1 && nSubstns > 0) {
+            nParams -= nSubstns
+        }
+        // zip names & ddvs while filtering any ddvs that were the abscissa
+        let pairs = []
+        ddvs.forEach((ddv, inx) => {
+            if (ddv !== null) pairs.push([names[inx], ddv])
+        })
+        return pairs.map(pr => {
+            return [<span>{pr[0]}</span>, pr[1]];
+        })
+    }
+
+    function pfsIndex2Descrn(pfs, index) {
+        const nParams = pfs.cube.params.length, nSubstns = pfs.substns.length
+        if (index < nParams) return pfs.cube.params[index].explanation
+        else if(index < nParams + nSubstns) return pfs.substns[index - nParams].explanation
+        else {
+            //console.log("pfs2Desc:", vsetIndex, frontendInfo.vsets[vsetIndex])
+            return frontendInfo.vsets[vsetIndex].ident
+        }
+    }
+
+    // handler for Go button; UI ensures that active chart is ready to go. Move gbl geom values into chart, then initiate transition
+    function goForChart() {
+        setChartSetupState(3);
+        const cdesc = {
+            title: chartTitle,
+            identifier: chartIdent,
+            parts: [{
+                source:"",
+                allDimsIndices: allDimsIndices,
+                outputs: outsSelected,
+                compareWithSubstn: compareWith,
+                appnc: {geom: curGeom, thickness: parseInt(curThick) + 1, hue: parseInt(curHue)}
+            }],
+            unit: outsSelected.length > 0 ? activePS.cube.outputs[outsSelected[0]].unit : '',
+            vsetIndex: vsetIndex,
+            outsAsAbscissa: outsAsAbscissa,
+            setYAxisLow: yaxisEnables[0],
+            setYAxisHigh: yaxisEnables[1],
+            YAxisLow: yaxisValue0,
+            YAxisHigh: yaxisValue1,
+            compareOptions: compareStringsOption
+        }
+        console.log("GFC:", cdesc)
+        // externals are in pll arrays externalsSelected, selXParams, and selXOutputs. Last 2 tell settings for each external
+        externalsSelected.forEach((xselInx, xInxInx) => {
+            let xtrnl = frontendInfo.externals[xselInx]
+            let prms = Array(xtrnl.cube.params.length).fill(0)
+            console.log("GFC;1:", prms, selXParams, xInxInx)
+            if (xtrnl.cube.params.length > 0) prms[selXParams[xInxInx]] = -1
+            let xpart = {
+                source: xtrnl.cube.ident,
+                allDimsIndices: prms,
+                outputs: selXOutputs[xInxInx],
+                appnc: {geom: 'Line', thickness: parseInt(selXThicks[xInxInx]) + 1, hue: parseInt(selXHues[xInxInx])}
+            }
+            cdesc.parts.push(xpart)
+        })
+        setChartDesc(cdesc);
+        chartTrans(cdesc);
+    }
+    function setChartDesc4Edit(prms) {
+        console.log("setChartDesc4Edit", prms)
+        let part0 = prms.parts[0];
+        setAllDimsIndices(part0.allDimsIndices);
+        setOutsSelected(part0.outputs);
+        setCurGeom(part0.appnc.geom);
+        setCurHue(part0.appnc.hue);
+        setCurThick(part0.appnc.thickness);
+        setCompareWith(part0.compareWithSubstn);
+        setCompareStringsOption(prms.compareOptions)
+        setChartIdent(prms.identifier);
+        setChartTitle(prms.title);
+        const tmp4externals = []
+        const tmp4params = []
+        const tmp4outputs = []
+        const tmp4hues = []
+        const tmp4thicks = []
+        for (let i = 1; i < prms.parts.count; i++) {
+            const nxpart = prms.parts[i]
+            const xInx = frontendInfo.externals.findIndex(elt => elt.cube.ident === nxpart.source)
+            if (xInx < 0) { console.log("UNKNOWN EXTERNAL: NOT SUPPOSED TO HAPPEN"); return }
+            tmp4externals.push(xInx);
+            tmp4params.push(nxpart.allDimsIndices);
+            tmp4outputs.push(nxpart.outputs);
+            tmp4hues.push(nxpart.appnc.hue);
+            tmp4thicks.push(nxpart.appnc.thickness);
+        }
+        setExternalsSelected(tmp4externals);
+        setSelXParams(tmp4params);
+        setSelXOutputs(tmp4outputs);
+        setSelXHues(tmp4hues);
+        setSelXThicks(tmp4thicks);
+        setYaxisEnables([prms.setYAxisLow, prms.setYAxisHigh]);
+        setYaxisValue0(prms.YAxisLow.toString())
+        setYaxisValue1(prms.YAxisHigh.toString())
+    }
+    function stringEllipsis(obj, maxcnt) {
+        let objstrg = String(obj);
+        if (objstrg.length < maxcnt) return objstrg;
+        else return objstrg.slice(0, maxcnt-3) + "..."
+    }
+    function editSaved(inx) {
+        const cdesc = frontendInfo.savedCharts[inx];
+        setEditBecause("Editing Saved Chart ");
+        setChartDesc4Edit(cdesc);
+    }
+    function showSaved(inx) {
+        editSaved(inx);
+    }
+}
+
+// JS functions to support vizPage
+javascript {
+    const setupDoneValue = 3;       // When chartSetupState counter reaches 3, we're ready to create a chart.
+    function setupDone() {
+        return chartSetupState === setupDoneValue;
+    }
+    function editChart() {
+        setEditBecause("Editing Chart")
+        setEditMode(0)
+    }
+
+    // Action ftn for save chart button in MakeChart
+    function saveChart() {
+        const theChartDesc = chartDesc;
+        // do some consistency checking that's hard to enforce in the UI state machine
+        let nDS = theChartDesc.parts.length - 1         // tricky: 1 if external, else 0
+        const part0 = theChartDesc.parts[0]
+        nDS += part0.outputs.length
+        if (part0.compareWithSubstn.length > 0) nDS += 1
+        if (nDS != 2) theChartDesc.compareOptions = 0
+        theChartDesc.identifier = chartIdent
+        theChartDesc.title = chartTitle
+        saveTrans(theChartDesc)
+        const descInx = frontendInfo.savedCharts.findIndex(elt => elt.identifier === theChartDesc.identifier)
+        const fei0 = {}
+        Object.assign(fei0, frontendInfo)
+        if(descInx < 0) { fei0.savedCharts.push(theChartDesc) }
+        else fei0.savedCharts[descInx] = theChartDesc
+        setFrontendInfo(fei0)
+    }
+    function testExternalsNumeric() {
+        if ('externals' in frontendInfo && chartSetupState > 1) {
+            const hasParams = frontendInfo.externals.filter(xtnl => xtnl.cube.params.length > 0)
+            if (hasParams.length > 0 && baseIsNumeric()) console.log("TXN")
+            return hasParams.length > 0 && baseIsNumeric()
+        }
+        return false;
+    }
+    function testExternalsCategoric() {
+        if ('externals' in frontendInfo && chartSetupState > 1) {
+            const hasParams = frontendInfo.externals.filter(xtnl => xtnl.cube.params.length === 0)
+            if (hasParams.length > 0 && !baseIsNumeric()) console.log("TXC")
+            return hasParams.length > 0 && !baseIsNumeric()
+        }
+        return false;
+    }
+}
+
+// This page shows either the setup controls for a chart (aka editMode) or the chart itself. Most of the code here is
+// for setup; the chart showing code is in MakeChart, a perfsis local component.
+pagespec vizPage = Div(height~"900px") {
+    FlexWrap(justify~"center") {
+        IncludeIf("() => editMode === 0") {
+            // This is the editPage.
+            // It has 3 stacked bands: a top part that announces what we're doing, a big middle area with 3 horiz gridded
+            // cntls that set params, and a bottom strip with Set Chart buttons, a descrn Textbox, and a way to save/unsave it.
+            // Top panel: announce, plus dropdown of saved charts
+            // Main area: get params
+            Div(width~"550px") {
+                Explanatory(text~"() => 'cube' in activePS ? activePS.cube.description : 'nothing selected'")
+                Span() {
+                    Text("Title: ")
+                    Textbox(size~"50"
+                        placeholder~"Title will be auto-generated; override by typing here"
+                        value~"() => chartTitle"
+                        changefn~"e => setChartTitle(e.target.value)")
+                }
+            }
+            GridLayout(width~"550px", margin~"5px", columns~"5fr 6fr") {
+                Div() {
+                    H5(label~"What's in X?")
+                    DropdownValue(
+                        optionLabel~"Select abscissa...",
+                        options~"abscissaValues()"
+                        selectValue~"() => allDimsIndices.findIndex(x => x === -1)"
+                        changefn~"abscissaHandler"
+                    )
+                }
+                FlexWrap(justify~"flex-end" width~"150px") {
+                    Text(editBecause)
+                    DropdownValue(
+                        options~"'savedCharts' in frontendInfo ? frontendInfo.savedCharts.map(x => x.identifier) : []"
+                        values~"[...Array('savedCharts' in frontendInfo ? frontendInfo.savedCharts.length : 0).keys()]"
+                        optionLabel~"Saved Charts..."
+                        selectValue~"-1"
+                        changefn~"v => showSaved(v)")
+                }
+            }
+            GridLayout(width~"550px", margin~"5px", columns~"5fr 6fr") {
+                Div() {
+                    VisibleIf("() => chartSetupState > 0") {
+                        H5(label~"What's in Y?")
+                        FlexWrap(width~"240px", class~ThinBorder) {
+                            HRadioButton(labels~"['Line', 'Bar', 'Dot']", initval~"() => curGeom", clickfn~"e => setCurGeom(e.target.value)")
+                            HueSelectSlider(value~"curHue" width~"120px" changefn~"e => setCurHue(e.target.value)")
+                            HRadioButton(labels~"[<ThinLine />, <ThickerLine />, <ThickLine />]", values~"['0', '1', '2']",
+                                initval~"() => curThick", clickfn~"e => { let tmp = e.target.value;  setCurThick(tmp) }")
+                            // two rows of checkbox+textbox
+                            GridLayout(width~"180px", margin~"5px", columns~"100px 70px") {
+                                Checkbox(label~"Set Y min", clickfn~"x => setYaxisEnablesAt(x.target.checked, 0)", checked~"yaxisEnables[0]")
+                                Textbox(value~"() => yaxisValue0" changefn~"e => setYaxisValue0(e.target.value)", disabled~"!yaxisEnables[0]")
+                                Checkbox(label~"Set Y max", clickfn~"x => setYaxisEnablesAt(x.target.checked, 1)", checked~"yaxisEnables[1]")
+                                Textbox(value~"() => yaxisValue1" changefn~"e => setYaxisValue1(e.target.value)", disabled~"!yaxisEnables[1]")
+                            }
+                        }
+                        GridTable(
+                            width~"300px", columnWidths~"1fr 1fr",
+                            data~"generateOutputsTable()"
+                        )
+                    }
+                }
+                GridTable(width~"250px", columnWidths~"[1]", data~"selectedExternals()")
+            }
+            VisibleIf("() => chartSetupState > 1") {
+                H5(label~"Other Cube Dimensions:")
+                GridTable(
+                    width~"500px", columnWidths~"250px 100px",
+                    data~"generateOCDTable()"
+                )
+                CompareOptions(srcgen~"genCompareOptions",
+                    vrblabels~"vrblabels"
+                    csoption~"() => vrblabels[compareStringsOption]"
+                    cursubstn~"() => compareWith.join('#')"
+                    disabled~"disableCompare()",
+                    srcfn~"genCmpOptsDD",
+                    rbclick~"genCmpOptsRB")
+            }
+            VisibleIf("() => chartSetupState > 1 && 'externals' in frontendInfo && frontendInfo.externals.length > 0") {
+                H5(label~"Add Externals?")
+                IncludeIf("() => outsAsAbscissa ? testExternalsCategoric() : testExternalsNumeric()") {
+                    Checkbox(label~"Require compatible units", clickfn~"x => setCompatUnits(x.target.checked)", checked~compatUnits)
+                    GridTable(
+                        width~"500px", columnWidths~"1fr 2fr",
+                        data~"generateExternalsTable()"
+                    )
+                }
+            }
+            // Bottom: Finish, plus descrn and saved checkbox
+            GridLayout(width~"800px", columns~"1fr 1fr 1fr") {
+                HButtons(menulabels~"['Show Chart']", clickfn~"() => goForChart()")
+                Checkbox(label~"Saved",
+                    clickfn~"x => setParamsSaved(x.target.checked)",
+                    checked~paramsSaved, disabled~"x => chartDesc.descrn === ''")
+            }
+        }
+        IncludeIf("() => editMode === 1 && setupDone()") {
+            MakeChart(w~"600", h~"450", data~theChart, params~chartDesc, editfn~editChart,
+                description~"() => chartIdent", savefn~saveChart, descChangefn~"setChartIdent")
+        }
+    }
+}
+
+css {
+    .App {
+        background-color: #f0f0f0;
+        font-size: medium;
+    }
+
+    .ExplainBox {
+        height:100px;
+        width:150px;
+        border: black 1px;
+        overflow: auto;
+    }
+    h5 {
+        font-weight: bold;
+        display:block;
+        margin-block-start: 1.1em;
+        margin-block-end: 0.3em;
+    }
+}
+
+pagespec initialPage = Div(class~App) {
+    IncludeIf("() => allPerfspecs === []") {
+        Text("You need to point your server at a directory that has some perfspecs in it...")
+    }
+    IncludeIf("() => allPerfspecs !== []") {
+        // 1. narrow strip at top with top level cntls and feedback
+        Div(class~HFlex, height~"60px") {
+            FlexWrap(justify~"space-around" dir~"row" align~"center" width~"600px") {
+                HButtons(menulabels~"['Manage', 'Visualize']", width~"200px", selected~mainMode, clickfn~"(index) => setMainMode0(index)")
+                DropdownValue(
+                    options~"allPerfspecs.map(x => x.ident)",
+                    optionLabel~"None Selected...",
+                    label~"Perfspecs...",
+                    changefn~"value => setActivePS0(value)",
+                    selectValue~"() => selectedPSIndex"
+                )
+            }
+            IncludeIf("() => 'ident' in activePS") {
+                Explanatory(text~"() => 'descrn' in activePS ? activePS.descrn : 'no descrn'", width~"400px")
+            }
+        }
+        Insert(mgmtPage, vizPage) { "mainMode" }
+    }
+}
+
+// ****************
+// Below here is code for actionfns and other transition related activity
+
+import "file"
+import "dataTable" as dtbl
+import go "flag"
+import go "os"
+import "strings"
+import "bytes"
+import "regexp"
+import "combics" as strms
+
+
+// Support for code that grabs data for charts. Abstractly, this is all about projections from hypercubes of varying sizes
+// and numbers of dimensions, stored in various csv files. See dataTable documentation for details of theory and practice.
+// For perfsis, parameters are the "normal" dimensions; substitutions are the extended ones.
+// The UI lets you build a single cube of 1-3 dims known as abscissa, multiseries, clickable.
+
+// Parameter is similar but not identical to dtbl.paramT; this is a cvt method.
+val param2paramT = \(prm: Parameter) { [dtbl.paramT: prm.ident, prm.explanation, "", prm.elements, true, true] }
+val vset2paramT = \(vset: VersionSet) { [dtbl.paramT: vset.ident, vset.description, "", vset.elements.{stringify(this)}, true, true] }
+
+// Given the bytes of a csv file, return a list(list(string))
+// To protect against files with empty lines & such, pad files with fewer than the max #cols with empty ones.
+val splitCsvBytes = \imp(buff: list(byte)) {
+    val rows = bytes.split(buff, ['\n'])
+    var splitrows = rows.{ bytes.split(this, ",").{ cvt(this, string) } }
+    // The bytes.Split ftn is pretty lame with a final newline, which is pretty common, it creates an extra line with an empty string
+    // This is tricky to get rid of, so I'm taking a shortcut
+    if(buff[buff.count-1] == '\n') splitrows = splitrows[0...splitrows.count - 1]
+    val maxcols = max(splitrows.{ this.count }, -1)
+    val padTo = \(cols:list(string), wanted:integer) {
+        if(cols.count < wanted) cols + (1..wanted - cols.count).{ "" }
+        else cols
+    }
+    splitrows.{ padTo(this, maxcols) }
+}
+
+
+import "webgen/charthelp" melted
+
+// Note that by construction (see doSelect) the order of allDimsIndices is (1) normal params; (2) substns; (3) optional HM dim.
+val stateAttribs = tuple(
+    dirname:string,                 // the directory we get our perfspecs from
+    pfsOptions: list(PfsData),     // we store full meta data on each perfspec we know about
+    activePS: PfsData,                 // info about the selected perfspec
+    frontendInfo: Frontend,
+    dscheme: dtbl.datascheme,
+    // The next 2 slots are state info held in server between the 2 steps of setting up an external data source.
+    xtrnlAccessor: string,          // This is the original source, not the extracted version stored locally
+    xtrnlData: dtbl.rowcolT,
+    baseParams: list(dtbl.paramT),
+    jstrmOut: xJsonT,
+    adiCount: integer              // used to track VrsnSet activity
+)
+
+val runstateT = extend stateAttribs where {
+    method lithook = \mod(dirnm: string) {
+        dirname = dirnm
+        pfsOptions = []
+    }
+
+    private method getWorkingDirName = \(basename: string) { dirname + "/wd.#{basename}/" }
+
+    // Document how to find the perfspec name, which is quite well hidden
+    private method perfspecName = \() { activePS.cube.ident }
+
+    // save the current state of the frontend slot to its file
+    private method saveFrontend = \imp() {
+        val fefnm = getWorkingDirName(self.perfspecName) + "frontend.json"
+        var fefd = file.createBasic(fefnm)
+        var jstrm = [json.jsonStreamer: ]
+        jstrm.toJsonPretty(frontendInfo, "  ")
+        fefd.write(jstrm.out())
+        fefd.close()
+    }
+
+    // Abstract the way we generate identifiers for versions; maybe just the number but maybe something from context
+    private method versionName = \(vnum: integer) {
+        "V#{vnum}"
+    }
+
+    // Given an index in the allDims of the active perfspec, access the right slot to get the elts
+    // Return the elements of allDimsIndices at index.
+    // This will be called on enumerated indices of allDimsIndices; this can be as abscissa, multiseries, or clickable.
+    private method pfsIndex2Elts = \(index: integer) -> list(string) {
+        val psdims = activePS.nDimensions
+        //println("pfsIndex2Elts:", index, psdims, activePS.index2Elts(index))
+        if(index < psdims) activePS.index2Elts(index)
+        else if(index >= psdims + frontendInfo.vsets.count) (0..activePS.version).{ versionName(this) }
+        else frontendInfo.vsets[index - psdims].elements.{ versionName(this) }
+    }
+
+    private method pfsIndex2Ident = \(index: integer) -> string {
+        val psdims = activePS.nDimensions
+        if(index < psdims) activePS.index2Ident(index)
+        else if(index >= psdims + frontendInfo.vsets.count) "versions"
+        else frontendInfo.vsets[index - psdims].ident
+    }
+
+    // Generate a list of all the filenames we could possibly use; this means across substns and vsets.
+    // Versions has a single element except when using vsets. The streamer created per version enumerates the substn filenames.
+    // Note that in general, not all of these files will be read for a particular query.
+    private method genFilenames = \imp(versions: list(integer)) {
+        val letters = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s"]
+        var names:list(string) = []
+        var nameStrmr = [strms.streamIndices: activePS.substns.{ elements.count }]
+        if(nameStrmr.done) {
+            each(vnum^versions) names.pushb("#{vnum}/LMa.csv")
+        } else while(!nameStrmr.done) {
+            val tmp = nameStrmr.next        // get next list of indices for each substn
+            val ltr0 = strings.join(tmp.{ letters[this] }, ``)
+            each(vnum^versions) names.pushb("#{vnum}/LM#{ltr0}.csv")
+        }
+        println("versions", versions, "lead to filenames:", names)
+        names
+    }
+    assert noInline(genFilenames)
+
+    // Webgen makes sure this gets called at startup.
+    method commandLine = \mod() {
+        flag.Parse()
+        val args = flag.Args()
+        if(args.count == 1) dirname = args[0]
+    }
+
+    // The doLoad action is run automatically when the initial page is loaded.
+    // It reads the directory given in the CLI args for *.perfspec, opens the relevant pfsData.json files,
+    // and generates a list of PerfspecSketch for the dropdown.
+    method doLoad = \mod() -> actionfnRettype {
+        val rddir = os.ReadDir(dirname)
+        if(rddir.err != nil) return [actionfnRettype: "can't read " + dirname, 0, ""]
+        val pfsnames = rddir.ok.{this.Name()}.[strings.endsWith(this, ".perfspec")]
+        pfsOptions = []
+        each(nm^pfsnames) {    // get metadata file for its docmtn string
+            val nm0 = nm[0...nm.count - 9]     // strip ".perfspec"
+            var fd = file.openWithError(getWorkingDirName(nm0) + "pfsData.json")
+            if(tag(fd) == :ok) {
+                val bytes: list(byte) = zerolist(fd.size())
+                fd.read(bytes)
+                var jstrm = [json.jsonStreamer: bytes]
+                val mfilex: PfsData = jstrm.fromJson()
+                fd.close()
+                pfsOptions.pushb(mfilex)
+            }
+        }
+        val pfsketch = pfsOptions.{ [PerfspecSketch: cube.ident, cube.description] }
+        var jstrm = [json.jsonStreamer: ]
+        val apsT = tuple(allPerfspecs: list(PerfspecSketch))
+        jstrm.toJson([apsT: pfsketch])
+        [actionfnRettype: "", 0, jstrm.out()]
+    }
+
+    // The doSelect action runs when the user selects a perfspec to focus on.
+    // It sends the selected PfsData and FrontendInfo to the client.
+    method doSelect = \mod(pfsname: string) -> actionfnRettype {
+        var ret = [actionfnRettype: "", 0, ""]
+        val pfsi = pfsOptions[this.cube.ident == pfsname]
+        if(pfsi == nil) ret.err = "client sent an unknown perfspec identifier??"
+        else {
+            val fefnm = getWorkingDirName(pfsname) + "frontend.json"
+            var fefd = file.openWithError(fefnm)
+            if(tag(fefd) == :err) {
+                println("; failed")
+                frontendInfo = [Frontend: [], [], [], 0]
+                var fefd2 = file.createBasic(fefnm)
+                var jstrm = [json.jsonStreamer: ]
+                jstrm.toJsonPretty(frontendInfo, "  ")
+                fefd2.write(jstrm.out())
+                fefd2.close()
+            } else {
+                val bytes: list(byte) = zerolist(fefd.size())
+                fefd.read(bytes)
+                var jstrm = [json.jsonStreamer: bytes]
+                frontendInfo = jstrm.fromJson()
+            }
+            val nDimInfo = pfsi.cube.params.count + pfsi.substns.count;
+            activePS = pfsi
+            adiCount = pfsi.substns.count
+            val filefmt = [dtbl.fileFormat: pfsi.cube.params.{ param2paramT(this) }, pfsi.cube.outputs.{ ident }]
+            self.dscheme = [dtbl.datascheme: filefmt, dtbl.stdFileGetter]
+            val names = genFilenames([frontendInfo.preferredVersion])
+            println("names:", names)
+            baseParams = pfsi.substns.{ param2paramT(this) }
+            dscheme.update(baseParams, names, getWorkingDirName(pfsname))
+            var jstrm = [json.jsonStreamer: ]
+            val sel = [tuple(activePS: PfsData, frontendInfo: Frontend, allDimsIndices: list(integer)): pfsi, frontendInfo, (1..nDimInfo).{0}]
+            jstrm.toJson(sel)
+            ret.response = jstrm.out()
+        }
+        ret
+    }
+
+    // doVSet is the actionfn for the transition that defines a new version set.
+    // Client has defined everything, record it here as well and save in frontend.json. Return nothing.
+    method doVSet = \mod(ident: string, desc: string, elementsStrg:string) -> actionfnRettype {
+        println("doVSet elements:", elementsStrg)
+        val elements = strings.split(elementsStrg, ",").{ this.to_i }
+        frontendInfo.vsets.pushb([VersionSet: ident, desc, elements])
+        saveFrontend()
+        [actionfnRettype: "", 0, ""]
+    }
+
+    // doExternal1 is the actionfn for the first stage (of two) to define an external datasource that we
+    // can compare with data in the current perfspec.
+    // Client has identified a csv file as the source of the external data. We open it and send the contents
+    // back for step two on the client side -- labeling the columns, excluding any unwanted rows, etc.
+    method doExternal1 = \mod(filename: string, filedir: string) -> actionfnRettype {
+        // Put the filename parts together, read the file, etc. DataTable.stdFileGetter is almost what I want but panics, so I mod it here.
+        xtrnlAccessor = filedir + filename
+        var fd = file.openWithError(xtrnlAccessor)
+        if(tag(fd) == :err) return [actionfnRettype: fd, 0, ""]
+        val buff: list(byte) = zerolist(fd.size())
+        if(buff.count == 0) return [actionfnRettype: "can't handle empty file", 0, ""]
+        fd.read(buff)
+        fd.close()
+        val splitrows = splitCsvBytes(buff)
+        xtrnlData = splitrows
+        var jstrmOut = [json.jsonStreamer: ]
+        jstrmOut.toJsonStartObject
+        // add the chart data
+        jstrmOut.toJsonString("tableDataExternal")
+        jstrmOut.add(":[")
+        val lastrow = splitrows.count - 1
+        each(row^splitrows, inx) { jstrmOut.toJsonListString(row); if(inx < lastrow) jstrmOut.add(",") }
+        jstrmOut.add("]}")
+        [actionfnRettype: "", 0, jstrmOut.out()]
+    }
+
+    // Client finished second step of "create external" process, is sending info needed to finalize. We're going to write
+    // a csv file and a Cubedef. In the args, idents and cols are pll arrays of identifiers and indices, respectively; nParams
+    // tells us where the boundary is between params and outputs. We don't currently have descrns, units, or elements (for params).
+    // We can (and will) extract elements from the data. Beyond that, the output csv file comes from selecting the cols in
+    // indices and rows not in suppressedRows.
+    method doExternal2 = \mod(jsonbuff: list(byte)) -> actionfnRettype {
+        val x2argsT = tuple(ident, description: string, nParams: integer, idents: list(string), cols, suppressRows: list(integer))
+        var jstrmIn = [json.jsonStreamer: jsonbuff]
+        val tmp:x2argsT = jstrmIn.fromJson()
+        var params: list(Parameter) = []
+        var outputs: list(Output) = []
+        each(i^0...tmp.cols.count)
+            if(tmp.nParams > params.count) params.pushb([Parameter: tmp.idents[i], "", "", []]) else outputs.pushb([Output: tmp.idents[i], "", ""])
+        var cube = [Cubedef: tmp.ident, tmp.description, params, outputs]
+        var xdef = [ExternalData: cube, [], false, xtrnlAccessor]       // no contexts yet
+        // More convenient to create the output file data as a rowcolT since we can use dataTable to check and extract param elements
+        var outdata: dtbl.rowcolT = []
+        var suppressIndex = 0
+        each(inx^0...xtrnlData.count) {
+            if(suppressIndex < tmp.suppressRows.count && tmp.suppressRows[suppressIndex] == inx) suppressIndex += 1
+            else outdata.pushb(tmp.cols.{ xtrnlData[inx][this] })
+        }
+        // Now write the imported csv file, note that it's local & named after the ident given here.
+        val xtdirName = getWorkingDirName(self.perfspecName) + "externals"
+        os.MkdirAll(xtdirName, 0x1cb)       // octal 755 = 1cb
+        var fd = file.createBasic(xtdirName + "/#{tmp.ident}.csv")
+        each(row^xtrnlData) fd.write(strings.join(row, ",") + "\n")
+        fd.close()
+        // Next, extract the elements for params from the rows. Assume that suppressed rows don't participate.
+        val problem = outdata.checkParameterEncoding(tmp.nParams)
+        unless(problem == "") return [actionfnRettype: problem, 0, ""]
+        val pElts:dtbl.rowcolT = outdata.extractParameters(tmp.nParams)
+        println("extractParameters:", tmp.nParams, pElts)
+        each(pr^xp([prm~params, elt~pElts])) pr.prm.elements = pr.elt
+        frontendInfo.externals.pushb(xdef)
+        saveFrontend()
+        // Ok, ready to respond to client
+        var jstrm = [json.jsonStreamer: ]
+        val responseT = tuple(newExternalData: ExternalData)
+        jstrm.toJson([responseT: xdef])
+        [actionfnRettype: "", 0, jstrm.out()]
+    }
+
+    // doSaveAction is the action function for the save transaction, which saves chart parameters in the frontend file for
+    // the current perfspec. See also fullsave.
+    method doSaveAction = \mod(jsonbuff: list(byte)) -> actionfnRettype {
+        var jstrmIn = [json.jsonStreamer: jsonbuff]
+        val tmp:tuple(params:ChartDesc) = jstrmIn.fromJson()
+        if(jstrmIn.errcount > 0) return [actionfnRettype: "client bug in json:" + strings.join(jstrmIn.errorList.{ fmt(this) }, "; "), 0, ""]
+        val cdesc0 = tmp.params
+        println("got cdesc0=", cdesc0)
+        val scIndex = frontendInfo.savedCharts[identifier == cdesc0.identifier => index]
+        if(scIndex == nil) frontendInfo.savedCharts.pushb(cdesc0)
+        else frontendInfo.savedCharts[scIndex] = cdesc0
+        saveFrontend()
+        [actionfnRettype: "", 0, ""]
+    }
+
+    method doPrefVersion = \mod(prefver:string) {
+        frontendInfo.preferredVersion = prefver.to_i
+        val names = genFilenames([frontendInfo.preferredVersion])
+        println("doPV", frontendInfo.preferredVersion, "names:", names)
+        baseParams = activePS.substns.{ param2paramT(this) }
+        dscheme.update(baseParams, names, getWorkingDirName(self.perfspecName))
+        saveFrontend()
+        [actionfnRettype: "", 0, ""]
+    }
+
+    // Call this after extractChartData to write attributes that don't depend intimately on the shape of the chart data
+    // It closes the entire object -- what it writes is unbalanced in that sense.
+    method wrapChartData = \mod(cdesc0: ChartDesc) {
+        val cpart0 = cdesc0.parts[0]
+        val adi = cpart0.allDimsIndices
+        var clickInx = adi.index(-2)
+        val clickElts:list(string) = clickInx == nil ? [] : pfsIndex2Elts(clickInx)
+        var multiInx = adi.index(-3)
+        val multiElts:list(string) = multiInx == nil ? [] : pfsIndex2Elts(multiInx)
+        jstrmOut.add(",\"multiElts\":")
+        jstrmOut.toJsonListString(multiElts)
+        jstrmOut.add(",\"clickElts\":")
+        jstrmOut.toJsonListString(clickElts)
+        // generate legend list(s)
+        val nParams = activePS.cube.params.count
+        val substnIndices = adi.[index >= nParams]      // I think this handles version sets properly (since pfsIndex2Elts does)...
+        jstrmOut.add(",\"legend\":")
+        if(multiElts.count > 0 && cpart0.outputs.count > 1) jstrmOut.add("[")
+        // color legend
+        var colored:list(string) = multiInx == nil ? [] : pfsIndex2Elts(multiInx)
+        if(cpart0.compareWithSubstn.count > 0) {
+            val substnBindings = \(vals:list(integer)) { strings.join(vals.{ activePS.substns[index].elements[this] }, "+") }
+            colored = [substnBindings(substnIndices), substnBindings(cpart0.compareWithSubstn)]
+        } else if(cdesc0.outsAsAbscissa) {
+            colored = ["outputs"]
+        } else if(colored.count == 0 && cdesc0.parts.count > 1) colored.pushb("base")
+        jstrmOut.toJsonListString(colored)
+        if(multiElts.count > 0 && cpart0.outputs.count > 1) {
+            jstrmOut.add(",")
+            val dashed = cpart0.outputs.{ activePS.cube.outputs[this].ident }
+            jstrmOut.toJsonListString(dashed)
+            jstrmOut.add("]")
+        }
+        var abscissaString = ""
+        var title = "outputs as a timeseries"
+        unless(cdesc0.outsAsAbscissa) {
+            val abscissaIndex = always(x~adi.index(-1), x!=nil)
+            abscissaString = pfsIndex2Ident(abscissaIndex)
+            val outstrg = strings.join(cpart0.outputs.{ activePS.cube.outputs[this].ident }, ", ")
+            title = outstrg + " vs " + abscissaString
+            // Add units, only check first output since they're supposed to be compatible, if present
+            val out0 = activePS.cube.outputs[cpart0.outputs[0]]
+            if(out0.unit != "") title += " (#{out0.unit})"
+            if(clickInx != nil) title += "; click for #{pfsIndex2Ident(clickInx)}"
+            if(multiInx != nil) title += "; all #{pfsIndex2Ident(multiInx)}"
+            if(cpart0.compareWithSubstn.count > 0) {
+                title += "; compare substns"
+            } else {
+                // Add substn binding info; code handles any # of substns, which makes it harder to follow
+                val unenumdSubstnIndices = substnIndices.[this >= 0 => [list(integer): index, this]]
+                val substnBindings = strings.join(unenumdSubstnIndices.{ pfsIndex2Elts(nParams + this[0])[this[1]] }, " & ")
+                val substWord = unenumdSubstnIndices.count > 1 ? "substns" : "substn"
+                if(substnBindings != "") title += "; #{substWord}: " + substnBindings
+            }
+            val xptype = tuple(prm:list(Parameter), diminx:list(integer))       // compiler currently doesn't like anon tuptype
+            each(pr^xp([xptype: activePS.cube.params, adi])) if(pr.diminx >= 0) title += "; #{pr.prm.ident}=#{pr.prm.elements[pr.diminx]}"
+        }
+        if(cdesc0.parts.count > 1) title += "; external: " + cdesc0.parts[1].source
+        // After all that title generation, override if the user provided something
+        if(cdesc0.title != "") title = cdesc0.title
+        jstrmOut.add(",\"abscissaDesc\":")
+        jstrmOut.toJsonString(abscissaString)
+        jstrmOut.add(",\"title\":")
+        jstrmOut.toJsonString(title)
+        jstrmOut.add("}}")
+    }
+
+    // This is another method shared between doChart and fullsave: get the x axis labels
+    method xvalues = \(cdesc0: ChartDesc) {
+        if(cdesc0.outsAsAbscissa) activePS.cube.outputs.{ ident }
+        else {
+            val absinx = always(x~cdesc0.parts[0].allDimsIndices.index(-1), x!=nil)
+            pfsIndex2Elts(absinx)
+        }
+    }
+
+    // And yet another doChart+fullsave shared method: check for vrsnSet and update as needed
+    method fix4VSet = \mod(cdesc0: ChartDesc) {
+        val nextAdiCount = cdesc0.parts[0].allDimsIndices.count - activePS.cube.params.count
+        if(nextAdiCount != adiCount) {      // need to run dscheme.update?
+            var xtparams = activePS.substns.{ param2paramT(this) }
+            var versions = [frontendInfo.preferredVersion]
+            if(nextAdiCount > adiCount && !cdesc0.outsAsAbscissa) {
+                // add versoin set here
+                if(cdesc0.vsetIndex < 0) {     // all versions
+                    val prm = [dtbl.paramT: "all versions", "", "", (0..activePS.version).{stringify(this)}, true, true]
+                    xtparams.pushb(prm)
+                    versions = 0..activePS.version
+                } else {
+                    val vset = frontendInfo.vsets[cdesc0.vsetIndex]
+                    xtparams.pushb(vset2paramT(vset))
+                    versions = vset.elements
+                }
+                //println("xtparams after push", xtparams, "versions:", versions)
+            }
+            val fnames = genFilenames(versions)
+            //println("fix4VSet gens filenames", fnames)
+            dscheme.update(xtparams, fnames, getWorkingDirName(activePS.cube.ident))
+            adiCount = nextAdiCount
+        }
+    }
+
+    // The doChart action runs when the user completes the state machine to select chart parameters and hits Go.
+    // It uses the extractChartData method in webgen/charthelp to read relevant data files and extract a table whose rows span the values of the
+    // abscissa and whose columns comprise ordinates, multi-selections, and clickables.
+    // The indices passed to dataTable.extract are similar but not identical to the allDimsIndices array managed by the
+    // front end. Specifically, dataTable.extract requires the multi-dims to be contiguous, eg -1 or -1,-2 or -1,-2,-3, etc.
+    // Whereas the front end treats -1 as abscissa (which isn't a problem) but -2 is always clickables, -3 multisel left, etc.
+    // So if there is multisel but not clickable, there's a -3 but no -2. This needs fixing before we pass to dataTable.
+    //
+    // Worth noting that the ChartDesc.outsAsAbscissa slot works differently from all other abscissa options: since it
+    // means to display the outputs as a sequence of data points along what are usually rows of the cube, this option
+    // requires selecting the data normally and then doing a transpose before encoding it.
+    method doChart = \mod(jsonbuff: list(byte)) -> actionfnRettype {
+        var jstrmIn = [json.jsonStreamer: jsonbuff]
+        val tmp:tuple(params:ChartDesc) = jstrmIn.fromJson()
+        if(jstrmIn.errcount > 0) return [actionfnRettype: "client bug in json:" + strings.join(jstrmIn.errorList.{ fmt(this) }, "; "), 0, ""]
+        val cdesc0 = tmp.params
+        //println("got cdesc0=", cdesc0)
+        fix4VSet(cdesc0)
+
+        jstrmOut = [xJsonT: [list(byte): ]]
+        jstrmOut.add("{\"tmpChartData\":")
+        jstrmOut.extractChartData(cdesc0, activePS, dscheme, frontendInfo, self.xvalues(cdesc0), dirname)
+        wrapChartData(cdesc0)
+        val errmsgs = jstrmOut.errors()
+        if(errmsgs != "") [actionfnRettype: errmsgs, 0, ""]
+        else [actionfnRettype: "", 0, jstrmOut.out()]
+    }
+
+
+    // doFullsave is the actionfn for fullsaveTrans, which saves both ChartDesc and data, so the chart can be drawn without
+    // access to the perfspec data.
+    // Get and extract a filename and a ChartDesc. Copy these without the
+    // final brace, then Use the ChartDesc to get a ChartData and closing brace so we have a json string for an object
+    // with [params, filename, data] props. Store that to the filename in the savedcharts dir of the top level directory
+    // we're running in. A complementary transition, likely running in a different app, can read these json files and send
+    // them to clients for generating charts independent of data sources.
+    method doFullsave = \mod(jsonbuff: list(byte)) -> actionfnRettype {
+        var jstrmIn = [json.jsonStreamer: jsonbuff]
+        val tmp:tuple(params:ChartDesc, perfspecName:string) = jstrmIn.fromJson()
+        if(jstrmIn.errcount > 0) return [actionfnRettype: "client bug in json:" + strings.join(jstrmIn.errorList.{ fmt(this) }, "; "), 0, ""]
+        var outbuff: list(byte) = zerolist(jsonbuff.count + 30)
+        jstrmOut = [xJsonT: outbuff]
+        jstrmOut.add(cvt(jsonbuff[0...jsonbuff.count - 1], string))
+        jstrmOut.add(`,"data":`)
+        val cdesc0 = tmp.params
+        println("got cdesc0=", cdesc0)
+        fix4VSet(cdesc0)
+        jstrmOut.extractChartData(cdesc0, activePS, dscheme, frontendInfo, self.xvalues(cdesc0), dirname)
+        println("jstrmOut after xcd:", jstrmOut.out())
+        wrapChartData(cdesc0)
+        println("jstrmOut after wrap:", jstrmOut.content.count, jstrmOut.out())
+        val errmsgs = jstrmOut.errors()
+        if(errmsgs != "") return [actionfnRettype: errmsgs, 0, ""]
+        else {
+            // save retval.response to the file in savedCharts dir
+            val savedDir = dirname + "/savedCharts"
+            val rddir = os.ReadDir(savedDir)
+            if(rddir.err != nil) {
+                println("reading #{savedDir} gets error", rddir.err)
+                if(strings.endsWith(rddir.err, "no such file or directory")) os.Mkdir(savedDir, 0x1cb)  // Assume it works.
+                else return [actionfnRettype: "server failure:" + rddir.err, 0, ""]
+            }
+            // We don't actually care what's in the directory; we'll write over files that exist
+            val fullfn = savedDir + "/#{tmp.perfspecName}." + cdesc0.identifier
+            println("writing file to ", fullfn)
+            var fd = file.createWithError(fullfn)
+            if(tag(fd) == :err) return [actionfnRettype: fd, 0, ""]
+            fd.write(cvt(jstrmOut.out(), list(byte)))
+            fd.close()
+            [actionfnRettype: "", 0, ""]
+        }
+    }
+
+}
+
+var progstate = [runstateT: "."]

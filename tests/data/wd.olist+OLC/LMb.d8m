@@ -1,0 +1,103 @@
+import go "math/rand"
+import go "time"
+import go "flag"
+
+
+// Test various aspects of olist and olistCached. For each different substn (olist plus OLC with and without flushing)
+// run 1M lookups with interspersed add+remove steps. Specifically, after grainSize lookups (currently set to 20K and 50K)
+// do the fraction of that number of add+rmv ops, the fraction in lookupsMultiple, expressed in %.
+// For various steady state sizes, run both olist and OLC, mixing phases of add+delete with lookup until 1M lookups are done.
+// The grainSize parameter controls how many phases, stepping from 16K to 64K lookups per phase
+// The lookupsMultiple parameter controls fraction of lookups vs add+delete
+
+import "olist" melted
+import "olistCached" melted
+import go "os"
+import go "log"
+
+// size 20K, 80K, 160K, 320K where K=1000
+var listSize:integer = flag.Int(`a`, 0, "steady state size of list")
+
+var lookupsMultiple:integer = flag.Int(`b`, 0, "100x the fraction of lookups vs add+delete in each phase")
+
+var grainSize:integer = flag.Int(`c`, 0, "number of lookups per phase")
+
+
+// Make elements for oltype that depend on only one random vbl -- b and c attribs are derived
+val olElt = tuple(a: integer, b: string, c: float)
+val randomStrings = ["ekrj", "rs2 rs2", "ij3lkj i3", "xx kj yy 4", "iu 3o4i 55", "lkj iud wlkj 66"]
+val make1 = \(aa:integer) { [olElt: aa, randomStrings[aa % 6], 0.5 * aa] }
+
+
+
+val oltype = olistCached(olElt, \(x:olElt){x.a}, 500); val doFlush = \mod(ol:oltype) { ol.flush() }; val lgnm = "olcA.log"
+
+val loadModel = \mod(olst: oltype) {
+    var dbgfile = os.Create(lgnm)
+    val logger = log.New(dbgfile.ok, "", 0)
+    var lookupsDone = 0
+    var lookupTime = 0, insTime = 0, rmvTime = 0
+    logger.Println("gsz:", grainSize)
+    while(lookupsDone < 1000000) {
+        var lkpvals:list(integer) = []
+        while(lkpvals.count < grainSize) {
+            lkpvals.pushb(rand.Intn(listSize*4))
+        }
+        var t0:time.Time = time.Now()
+        val allFound = lkpvals.{ make1(this) in olst }.count
+        logger.Println("allFound:", allFound)        // ensure compiler doesn't delete this
+        var since = time.Since(t0)
+        lookupTime += since
+        logger.Println("lkp:", lookupTime)
+        lookupsDone += grainSize
+        // The following hack disables merging the loop defining lkpvals (before time.Now() with the one using (after)
+        // Whether the each seql rewrite rule should be disabled by an intervening connected funcall is somewhat controversial.
+        // For now it isn't, hence the need for this hack.
+        if(rand.Intn(50) > 100) lkpvals[0] = 700
+        doFlush(olst)
+        // for the insert+remove phase, synth a list of random values that can't overlap with stuff in the list
+        // so we know they get added and removed
+        val insrmvCount = lookupsMultiple*grainSize/100
+        val arvals = (1..insrmvCount).{ make1(listSize*4 + rand.Intn(grainSize*5)) }
+        t0 = time.Now()
+        each(add^arvals) olst.insert(add)
+        since = time.Since(t0)
+        insTime += since
+        t0 = time.Now()
+        each(add^arvals) olst.remove(add)
+        since = time.Since(t0)
+        rmvTime += since
+    }
+    print(round(1e-6*lookupTime))
+
+    val insrmvScale = 1e-4*lookupsMultiple       // lookupsMultiple is *0.01 and we did 1e6 lookups
+    print(`,`, round(insrmvScale * insTime))
+
+    print(`,`, round(insrmvScale * rmvTime))
+
+}
+
+// Build the set to be tested, allowing elts between 0 and 3 times its size. Because there will be dups,
+// the actual set size will be less than sz.
+val build = \imp(sz:integer) -> oltype {
+    var ret = [oltype:]
+    while(ret.count < sz) {
+        val key = rand.Intn(sz*4)
+        unless(ret.keyIn(key)) ret.insert(make1(key))
+    }
+    ret
+}
+
+
+
+var seed:integer = flag.Int(`seed`, 0, ``)
+val runQuery = \imp() {
+flag.Parse()
+if(seed != 0) rand.Seed(seed)
+
+var theList = build(listSize)
+loadModel(theList)
+
+println()
+}
+runQuery()

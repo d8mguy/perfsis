@@ -1,0 +1,58 @@
+{
+  "params": {
+    "title": "",
+    "identifier": "test1",
+    "parts": [
+      {
+        "source": "",
+        "allDimsIndices": [
+          -1,
+          0,
+          0
+        ],
+        "outputs": [
+          0
+        ],
+        "compareWithSubstn": [],
+        "appnc": {
+          "geom": "Line",
+          "thickness": 1,
+          "hue": 0
+        }
+      }
+    ],
+    "unit": "microsecond",
+    "hmdimIndex": 0,
+    "outsAsAbscissa": false,
+    "setYAxisLow": true,
+    "YAxisLow": "0",
+    "YAxisHigh": "0",
+    "compareOptions": 0
+  },
+  "perfspecName": "indirectsort",
+  "data": {
+    "series": [
+      {
+        "x": 50000,
+        "y0": 7241.666500
+      },
+      {
+        "x": 250000,
+        "y0": 40608.291750
+      },
+      {
+        "x": 500000,
+        "y0": 89984.427250
+      },
+      {
+        "x": 1000000,
+        "y0": 194811.041500
+      }
+    ],
+    "multiElts": [],
+    "clickElts": [],
+    "legend": [],
+    "abscissaDesc": "listSize",
+    "title": "sort time vs listSize (microsecond); substn: comparison; extractComplexity=simple"
+  }
+}

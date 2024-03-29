@@ -1,0 +1,66 @@
+// Some of the types perfsis uses are abstracted here for use in front ends
+
+
+export Parameter, Output, Cubedef, Kvpair, PfsData
+
+// The following definitions determine the form of the pfsData.json file that describes each perfspec working dir
+
+// Parameter is used in a few ways. They live in the meta file of each perfspec as descrns of the "normal" dimensions.
+// Also, server sends them after select to help define a chart. (And client sends back assignments to them.)
+val Parameter = tuple(
+    ident:string,
+    explanation:string,
+    unit: string,
+    elements:list(string)
+)
+
+// Slightly diff from a Parameter: no elements but need units to determine what outputs are comparable
+val Output = tuple(
+    ident:string,
+    explanation:string,
+    unit: string
+)
+
+// This defines a hypercube with params.counts dimensions and values for each output at every vertex.
+val Cubedef = tuple(
+    ident:string,
+    description:string,
+    params:list(Parameter),
+    outputs:list(Output)
+)
+
+val Kvpair = tuple(
+    key:string,
+    value:list(string)
+)
+
+// A perfspec defines a cube and possibly some substitutions. There can be multiple versions of data, corresponding to
+// various conditions for collecting them. One can describe these in the context, which is essentially a dictionary.
+// Each key in the contexts is an identifier or short phrase, such as "runtime" or "compiler". Each value has the same
+// length, which is the number of versions. Versions that don't have a binding for a particular key get the empty string.
+// That means that when you create a new version you must add an elt (possibly empty) to every key's value, and when you
+// add a new key, its value must have empty strings for all previous versions.
+val PfsData = extend tuple(
+    cube: Cubedef,
+    substns: list(Parameter),
+    contexts: list(Kvpair),
+    version: integer
+) where {
+    method nDimensions = \() { cube.params.count + substns.count }
+
+    method index2Elts = \(index: integer) -> list(string) {
+        val nParams = cube.params.count, nSubstns = substns.count
+        //println("i2e", index, nParams, nSubstns, cube.params)
+        if(index < nParams) cube.params[index].elements
+        else if(index < nParams + nSubstns) substns[index - nParams].elements
+        else []
+    }
+
+    method index2Ident = \(index: integer) -> string {
+        val nParams = cube.params.count, nSubstns = substns.count
+        if(index < nParams) cube.params[index].ident
+        else if(index < nParams + nSubstns) substns[index - nParams].ident
+        else ""
+    }
+
+}

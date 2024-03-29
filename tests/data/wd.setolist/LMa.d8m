@@ -1,0 +1,68 @@
+import go "math/rand"
+import go "time"
+import go "flag"
+
+
+// Study set.subset operation for Gomap vs olist implementations. Use three parameters: (1) the size
+// of the main set; (2) the size of the subset; (2) the probability that the tested subset is actually a subset of the main one.
+// The last 2 parameters matter because as either gets smaller, the map implementation, which has to loop over full element
+// tests, has less to do and hence, gets potentially faster.
+
+import "set" melted
+import "olist" melted
+import go "math"
+
+val tuptype = tuple(a:integer, b:float, c:string)
+val olT = olist(tuptype, integer, \(atup:tuptype) { atup.a })
+
+var setSize:integer = flag.Int(`a`, 0, "number of random items in main set")
+
+var otherSize:integer = flag.Int(`b`, 0, "number of random items in set tested for subset")
+
+var yesprob:integer = flag.Int(`c`, 0, "percent of cases where subset is true")
+
+
+val loadModel = \imp() {
+    val maker = \(x:integer) { [tuptype: x, 5.3*x, ["aa", "bcde", "erkj"][x%3]] }
+    var mintime = 100000000, maxtime = 0, timeAccum = 0
+    var yescount = 0
+    each(trial^1..20) {
+        var mainSet:olT = []
+        while(mainSet.count < setSize) mainSet.insertIfUniq(maker(rand.Intn(5*setSize)))
+        var otherSet:olT = []
+        // cvt yesprob to a fraction and calc a probability for each elt of otherSet to be in mainSet
+        val logProbPerElt = math.Log(0.01*yesprob/otherSize)
+        while(otherSet.count < otherSize) {
+            val tmp = maker(rand.Intn(5*setSize))
+            val isIn = tmp in mainSet
+            // unusual condition equiv to (isIn && rand < prob) || (!isIn && rand >= prob)
+            val logProb = math.Log(rand.Float64())
+            if(isIn != (logProb >= logProbPerElt)) otherSet.insertIfUniq(tmp)
+        }
+        val t0 = time.Now()
+        if(mainSet.contains(otherSet)) yescount += 1
+        val d0:integer = time.Since(t0)
+        if(d0 < mintime) mintime = d0
+        if(d0 > maxtime) maxtime = d0
+        timeAccum += d0
+    }
+    print(round(0.05*timeAccum))
+
+    print(`,`, mintime)
+
+    print(`,`, maxtime)
+
+    print(`,`, 5*yescount)
+
+}
+
+
+var seed:integer = flag.Int(`seed`, 0, ``)
+val runQuery = \imp() {
+flag.Parse()
+if(seed != 0) rand.Seed(seed)
+loadModel()
+
+println()
+}
+runQuery()

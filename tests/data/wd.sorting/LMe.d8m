@@ -1,0 +1,51 @@
+import go "math/rand"
+import go "time"
+import go "flag"
+
+
+// Create lists of increasing sizes, then measure the time to sort them.
+// Use the instantiating sort module and also the generic option.
+// Do this for integer, float, and a random tuple type.
+
+import "sort" melted
+import go "math/rand"
+
+
+
+
+var listSize:integer = flag.Int(`a`, 0, "number of random items in list that gets sorted")
+
+
+// repeat each create+sort 4x and take min time. Time to generate list isn't counted.
+val loadModel = \imp() {
+    var t0:time.Time
+    var tmin, tmax, ttotal: integer
+    each(i^1..4) {
+        val tupT = extend tuple(a: string, b:integer, c:float) where {
+            method lithook = \mod(rval: integer) { a = ["a", "b", "c"][rval % 3]; b = rval; val tmp = cvt(rval, float)/125.7; c = tmp * tmp }
+            method $< = \(x, y: tupT) { x.b < y.b }
+        }
+        val theList: list(tupT) = (1..listSize).{ [tupT: rand.Intn(200000)] }; t0 = time.Now(); val sortCall = sort(theList)
+        var since = time.Since(t0)
+        ttotal += since
+        if(i == 1 || tmin > since) tmin = since
+        if(i == 1 || tmax < since) tmax = since
+    }
+    print(2.5e-4 * ttotal)
+
+    print(`,`, 100.0*(tmax - tmin)/tmin)
+
+}
+
+
+
+var seed:integer = flag.Int(`seed`, 0, ``)
+val runQuery = \imp() {
+flag.Parse()
+if(seed != 0) rand.Seed(seed)
+
+loadModel()
+
+println()
+}
+runQuery()

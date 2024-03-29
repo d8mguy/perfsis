@@ -1,0 +1,72 @@
+// Timing of json encoding and decoding in d8m
+
+import "codecs/json"
+
+val floatClose = \(v1, v2, eps: float) { abs(v1 - v2) < eps }
+
+val tuptype1 = extend tuple(attrib01: integer, attrib02: string, attrib03, attrib04: float) where {
+    method $== = \(other:tuptype1) {
+        attrib01 == other.attrib01 && attrib02 == other.attrib02 && floatClose(attrib03, attrib04, 1e-6)
+    }
+}
+val tuptype2 = tuple(attrib11, attrib12: tuptype1)
+val tuptype3 = tuple(attrib21: tuptype1, attrib22: tuptype2, attrib23: string)
+
+val randomStrings = ["string1", "another string", "a third one", "again & again", "five five",
+  "this and that", "i3u4lkj lkj", "3oiu kwej", "3kjdoius", "eksoiuxd e"]
+val make1 = \() {
+    val i0 = rand.Intn(5000) - 2500
+    val i1 = 1+rand.Intn(10000), i2 = 1+rand.Intn(20000)
+    // Note: convert the float to-from string because it doesn't write to 16 digits of precision
+    [tuptype1: i0, randomStrings[i1 % 10], stringify(2.5*i0/i1).to_f, stringify(3.7*i1/i2).to_f]
+}
+val make2 = \() {
+    [tuptype2: make1(), make1()]
+}
+val make3 = \() {
+    val a21 = make1()
+    [tuptype3: a21, make2(), randomStrings[(a21.attrib01+2501)%10]]
+}
+
+val loadmodel = \imp() {
+    var accum1 = 0, accum2 = 0
+    var min1 = 1000000000, min2 = 1000000000, max1 = 0, max2 = 0
+    var tt3 = make3()
+    val buff: list(byte) = zerolist(1000)
+    var jsout = [json.jsonStreamer: buff]
+    var t0:time.Time = time.Now()
+    // repeat 21 times but don't count timing on the first time
+    each(i^0..20) {
+        jsout.toJson(tt3)
+        val tt3s = jsout.out()
+        var delta = time.Since(t0)
+        if(i == 1) println("tt3s:", tt3s)
+        if(i > 0) {
+            accum1 += delta
+            min1 = min(min1, delta)
+            max1 = max(max1, delta)
+        }
+        jsout.reset()
+        jsout.content = tt3s
+        t0 = time.Now()
+        val tt4: tuptype3 = jsout.fromJson()
+        delta = time.Since(t0)
+        if(i > 0) {
+            accum2 += delta
+            min2 = min(min2, delta)
+            max2 = max(max2, delta)
+        }
+        unless(tt3 == tt4) exit("mismatch")
+        if(i == 1) println("tt4:", tt4)
+        tt3 = make3()
+        jsout.reset()
+        t0 = time.Now()
+    }
+    output "encode-min:min encode time:float:usec", "round(0.001*min1)"
+    output "encode-max:max encode time:float:usec", "round(0.001*max1)"
+    output "encode-avg:average encode time:float:usec", "0.05*1e-3*accum1"
+    output "decode-min:min decode time:float:usec", "round(0.001*min2)"
+    output "decode-max:max decode time:float:usec", "round(0.001*max2)"
+    output "decode-avg:average decode time:float:usec", "0.05*1e-3*accum2"
+}
+

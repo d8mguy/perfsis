@@ -1,0 +1,13 @@
+{"cube":
+  {"ident":"setAddRmv",
+    "description":" Build a set to a target size, then attempt to carefully measure the time it takes to run $in, add, remove.\n To minimize time taken by other ops, run these operations in a loop that uses a random list of values generated\n outside the loop. Run 3 different set implementations (Gomap, olist, splay tree), all over integer elements.\n",
+    "params":[{"ident":"targetSize","explanation":"number of probes to create the set","unit":"","elements":["1024","2048","4096","8192","16384","32768","65536","131072"]}],
+    "outputs":[
+      {"ident":"setsize","explanation":"size of set","unit":""},
+      {"ident":"inCount","explanation":"size of intersection","unit":""},
+      {"ident":"checktime","explanation":"time for each $in operation","unit":"nanosecond"},
+      {"ident":"t(remove1)","explanation":"time to remove each element or detect it is not present","unit":"nanosecond"},
+      {"ident":"addtime","explanation":"time to add each element","unit":"nanosecond"},
+      {"ident":"t(remove2)","explanation":"time to remove each element (known to be in set because just added)","unit":"nanosecond"}]},
+  "substns":[{"ident":"SET","explanation":"implementations of set","unit":"","elements":["as map","as olist","as splay tree"]}],
+  "contexts":[{"key":"runtime","value":["2021 M1 Macbook Pro","2021 M1 Macbook Pro","2021 M1 Macbook Pro"]},{"key":"compiler","value":["2023/01/14","2023/01/14","2023/01/14"]},{"key":"seed","value":["","12933","31337"]}],"version":2}

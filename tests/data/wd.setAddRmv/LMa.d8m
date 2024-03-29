@@ -1,0 +1,94 @@
+import go "math/rand"
+import go "time"
+import go "flag"
+
+
+// Build a set to a target size, then attempt to carefully measure the time it takes to run $in, add, remove.
+// To minimize time taken by other ops, run these operations in a loop that uses a random list of values generated
+// outside the loop. Run 3 different set implementations (Gomap, olist, splay tree), all over integer elements.
+
+import "set" melted
+
+val iset = set(integer)
+// Build the set to be tested, allowing elts between 0 and 2 times its size. Because there will be dups,
+// the actual set size will be less than sz.
+val build = \imp(sz:integer) -> iset {
+    var ret = [iset:]
+    each(i^1..sz) ret.add(rand.Intn(2 * sz))
+    ret
+}
+
+val addRmv = \mod(s:iset, tgtsz:integer) {
+    val elt = rand.Intn(2*tgtsz)
+    if(elt in s) s.remove(elt) else s.add(elt)
+}
+
+
+
+var targetSize:integer = flag.Int(`a`, 0, "number of probes to create the set")
+
+
+// When this is called, the set s is already built to targetsize, which is a gbl.
+val loadModel = \mod(s:iset) {
+    // Generate a list of at most 5000 elts, no larger than 1/4 the size of s, with elements in same range as s.
+    // We generate this first to minimize the amount of other work going on inside the timing loop.
+    val rands = (1..min(5000, targetSize/4)).{ rand.Intn(targetSize*2) }
+    var t0:time.Time
+    // setsize is the number of elts in s, which will be < targetSize but by how much we don't know
+    print(s.count)
+
+    var cnt = 0
+    // first, $in on
+    t0 = time.Now()
+    each(r^rands) if(r in s) cnt += 1
+    var since = time.Since(t0)
+    // inCount is the number of elts in the intersection of rands with s
+    print(`,`, cnt)
+
+    // checktime is the time to calculate inCount, normalized to rands.count
+    print(`,`, round(since.to_f/rands.count))
+
+    // next, remove (which is no-op if elt not present)
+    t0 = time.Now()
+    each(r^rands) s.remove(r)
+    since = time.Since(t0)
+    // rmvtime is the time to remove each elt of rands from s, normalized to rands.count
+    print(`,`, round(since.to_f/rands.count))
+
+    // now add (all elts removed so all will be added)
+    t0 = time.Now()
+    each(r^rands) s.add(r)
+    since = time.Since(t0)
+    // addtime is the time to remove add elt of rands from s, normalized to rands.count.
+    // Since no element of rands is currently in s, each add will really change s.
+    print(`,`, round(since.to_f/rands.count))
+
+    // final, remove again, this time all will be present
+    t0 = time.Now()
+    each(r^rands) s.remove(r)
+    since = time.Since(t0)
+    // rmv2time is the time to remove each elt of rands from s, normalized to rands.count.
+    // Since all elements of rands are currently in s, each remove will really change s.
+    print(`,`, round(since.to_f/rands.count))
+
+}
+
+import "olist" melted
+import "splay" melted
+
+
+
+
+
+var seed:integer = flag.Int(`seed`, 0, ``)
+val runQuery = \imp() {
+flag.Parse()
+if(seed != 0) rand.Seed(seed)
+
+var theSet = build(targetSize)
+applyST(Gomap(integer, boolean), theSet)
+loadModel(theSet)
+
+println()
+}
+runQuery()

@@ -1,0 +1,79 @@
+import go "math/rand"
+import go "time"
+import go "flag"
+
+
+// A perfspec in which we build a set to a target size then do a bunch of lookups with a known prob of success.
+
+
+import "set" melted
+
+var targetSize:integer = flag.Int(`a`, 0, "set size")
+
+var successProb:integer = flag.Int(`b`, 0, "percent of time lookups are to be successful")
+
+
+val randstrgs = ["one", "two", "three", "four", "five", "six"]
+
+// make aTuptype ordered
+val aTuptype = extend tuple(a, b:integer, c:string) where {
+    method $<= = \(other:aTuptype) { a <= other.a }
+    method $< = \(other:aTuptype) { a < other.a }
+    method lithook = \mod(gen:integer) {
+        a = gen
+        b = 2*gen
+        c = randstrgs[gen%6]
+    }
+}
+val intTup = extend tuple(a:integer) where {
+    method $<= = \(other:intTup) { a <= other.a }
+    method $< = \(other:intTup) { a < other.a }
+}
+
+import "olist" melted
+
+
+
+
+
+// We ensure that a known fraction of values are in the set with an arithmetic sequence for those; others are random but
+// generated so as not to be in the arith sequence.
+val loadModel = \imp() {
+    val prob = 0.01 * successProb
+    var known = 0
+    val aSeq = \(k:integer) { 6*k + 5 }     // so 5, 11, 17, 23, ...
+    var theSet = [set(intTup): ]
+    applyST(Gomap(intTup, boolean), theSet)
+    while(theSet.count < targetSize) {
+        var nxgen = 0
+        if(rand.Float64() < prob) { nxgen = aSeq(known); known += 1 }
+        else nxgen = 2 * rand.Intn(3 * targetSize)
+        theSet.add([intTup: nxgen])
+    }
+
+    var actual = 0
+    var t0:time.Time
+    var durTotal = 0
+    each(i^1..1000) {
+        val probe = (rand.Float64() < prob) ? aSeq(rand.Intn(known)) : 6 * targetSize + rand.Intn(targetSize)
+        t0 = time.Now()
+        if([intTup: probe] in theSet) actual += 1
+        var since = time.Since(t0)
+        durTotal += since
+    }
+    print(round(0.001 * durTotal))
+
+    print(`,`, actual)
+
+}
+
+
+var seed:integer = flag.Int(`seed`, 0, ``)
+val runQuery = \imp() {
+flag.Parse()
+if(seed != 0) rand.Seed(seed)
+loadModel()
+
+println()
+}
+runQuery()

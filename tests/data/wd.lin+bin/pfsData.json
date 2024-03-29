@@ -1,0 +1,54 @@
+{
+  "cube": {
+    "ident": "lin+bin",
+    "description": " The difference between O(N) and O(log(N)) list search is well known but I've never seen an answer to the question of where the runtimes cross. Obviously, the answer depends on many details. This perfspec answers that question. Specifically, generate lists of various lengths and run some searches on them. Use a substn to vary this between lists and olists, and another to search both integers and tuple. Run 1000 lookups and avg. Only param is listSize, the 2 substns give additional params.",
+    "params": [
+      {
+        "ident": "listSize",
+        "explanation": "steady state size of list",
+        "unit": "\"#{this}\"",
+        "elements": [
+          "100",
+          "400",
+          "1000",
+          "2000"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "ident": "lookupTime",
+        "explanation": "avg lookup time across lookup phase",
+        "unit": "nanosecond"
+      }
+    ]
+  },
+  "substns": [
+    {
+      "ident": "LT_ET",
+      "explanation": "list or olist collection with integer or tuple elements",
+      "unit": "",
+      "elements": [
+        "list(integer)",
+        "list(tuptype)",
+        "olist0(integer)",
+        "olist(tuptype...)"
+      ]
+    }
+  ],
+  "contexts": [
+    {
+      "key": "runtime",
+      "value": [
+        "2021 M1 Macbook Pro"
+      ]
+    },
+    {
+      "key": "compiler",
+      "value": [
+        "2023/11/13"
+      ]
+    }
+  ],
+  "version": 0
+}

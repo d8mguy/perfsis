@@ -1,0 +1,35 @@
+{
+  "cube":{
+    "ident":"sorting",
+    "description":" Create lists of increasing sizes, then measure the time to sort them. Use the instantiating sort module and also the generic option. Do this for integer, float, and a random tuple type.",
+    "params":[
+      {
+        "ident":"listSize",
+        "explanation":"number of random items in list that gets sorted",
+        "unit":"",
+        "elements":["5000","10000","20000","40000","60000","80000","100000","150000"]}
+      ],
+    "outputs":[
+      {
+        "ident":"sort time",
+        "explanation":"time to sort list",
+        "unit":"microsecond"},
+      {
+        "ident":"minmax diff",
+        "explanation":"max - min timings",
+        "unit":"percent"}
+      ]},
+  "substns":[
+    {
+      "ident":"typesGenerics",
+      "explanation":"what and how to sort: elt type, generic or instantiated",
+      "unit":"",
+      "elements":[
+        "list(integer)",
+        "list(float)",
+        "list(tupT)",
+        "list(integer) generic"
+        ]}
+    ],
+  "contexts":[],
+  "version":0}
