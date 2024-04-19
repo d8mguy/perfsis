@@ -16,6 +16,7 @@ tests:	tests/testSpec.d8m ../webgen/modules/md2html.d8m ../webgen/modules/charth
 install:	perfsisMeasure
 	mv perfsisMeasure $(execdir)
 	mkdir -p ${HOME}/Library/Application\ Support/D8m/Perfsis
+	cp -p -r modules ${HOME}/Library/Application\ Support/D8m/Perfsis/
 	cp -p pfsdtempl8.d8m ${HOME}/Library/Application\ Support/D8m/Perfsis/
 	webgen -port=8081 -deploy pfsFESpec.d8m
 	d8mc pfsFESpecSrvrPort8081.d8m
