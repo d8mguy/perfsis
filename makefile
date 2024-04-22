@@ -17,10 +17,10 @@ install:
 	mkdir -p ${HOME}/Library/Application\ Support/D8m/Perfsis
 	cp -p -r modules ${HOME}/Library/Application\ Support/D8m/Perfsis/
 	cp -p pfsdtempl8.d8m ${HOME}/Library/Application\ Support/D8m/Perfsis/
+	d8mc -addmod="perfsis,$(mdir)"
 	webgen -port=8081 -deploy pfsFESpec.d8m
 	d8mc pfsFESpecSrvrPort8081.d8m
 	mv pfsFESpecSrvrPort8081 build/
-	d8mc -addmod="perfsis,$(mdir)"
 	d8mc perfsisMeasure.d8m
 	mv perfsisMeasure $(execdir)
 	sed "2s:FFNAME:$(bdir):" pfsS0 > perfsisShow
