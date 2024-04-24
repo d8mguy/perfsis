@@ -2,8 +2,8 @@
 # install should be run with sudo
 
 execdir = /usr/local/bin
-mdir = $(PWD)/modules/
-bdir = $(PWD)/build
+mdir = ${HOME}/Library/Application Support/D8m/Perfsis/modules/
+bdir = $$PWD/build
 
 perfsisMeasure:	perfsisMeasure.d8m pfsdtempl8.d8m
 	d8mc perfsisMeasure.d8m
@@ -18,11 +18,8 @@ install:
 	cp -p -r modules ${HOME}/Library/Application\ Support/D8m/Perfsis/
 	cp -p pfsdtempl8.d8m ${HOME}/Library/Application\ Support/D8m/Perfsis/
 	d8mc -addmod="perfsis,$(mdir)"
-	webgen -port=8081 -deploy pfsFESpec.d8m
+	webgen -port=8081 -deploy="$$PWD" pfsFESpec.d8m
 	d8mc pfsFESpecSrvrPort8081.d8m
-	mv pfsFESpecSrvrPort8081 build/
+	mv pfsFESpecSrvrPort8081 $(execdir)/perfsisShow
 	d8mc perfsisMeasure.d8m
 	mv perfsisMeasure $(execdir)
-	sed "2s:FFNAME:$(bdir):" pfsS0 > perfsisShow
-	chmod a+x perfsisShow
-	cp perfsisShow $(execdir)
